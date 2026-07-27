@@ -13,12 +13,16 @@ proc apply_tab_size {{firsttab {}}} {
 }
 
 proc clear_diff {} {
-	global ui_diff current_diff_path current_diff_header
+	global ui_diff ui_diff_ln current_diff_path current_diff_header
 	global ui_index ui_workdir
 
 	$ui_diff conf -state normal
 	$ui_diff delete 0.0 end
 	$ui_diff conf -state disabled
+
+	$ui_diff_ln conf -state normal
+	$ui_diff_ln delete 0.0 end
+	$ui_diff_ln conf -state disabled
 
 	set current_diff_path {}
 	set current_diff_header {}
@@ -153,7 +157,7 @@ proc show_unmerged_diff {cont_info} {
 }
 
 proc advance_diff_queue {cont_info} {
-	global current_diff_queue ui_diff
+	global current_diff_queue ui_diff ui_diff_ln
 
 	set item [lindex $current_diff_queue 0]
 	set current_diff_queue [lrange $current_diff_queue 1 end]
@@ -162,13 +166,20 @@ proc advance_diff_queue {cont_info} {
 	$ui_diff insert end [lindex $item 0] [lindex $item 1]
 	$ui_diff conf -state disabled
 
+	$ui_diff_ln conf -state normal
+	set _nlines [regexp -all {\n} [lindex $item 0]]
+	for {set _i 0} {$_i < $_nlines} {incr _i} {
+		$ui_diff_ln insert end "\n"
+	}
+	$ui_diff_ln conf -state disabled
+
 	start_show_diff $cont_info [lindex $item 2]
 }
 
 proc show_other_diff {path w m cont_info} {
 	global file_states file_lists
 	global is_3way_diff diff_active repo_config
-	global ui_diff ui_index ui_workdir
+	global ui_diff ui_diff_ln ui_index ui_workdir
 	global current_diff_path current_diff_side current_diff_header
 
 	# - Git won't give us the diff, there's nothing to compare to!
@@ -240,6 +251,12 @@ proc show_other_diff {path w m cont_info} {
 			}
 		}
 		$ui_diff conf -state disabled
+		$ui_diff_ln conf -state normal
+		set _nln [expr {[lindex [split [$ui_diff index end] .] 0] - 1}]
+		for {set _i 0} {$_i < $_nln} {incr _i} {
+			$ui_diff_ln insert end "\n"
+		}
+		$ui_diff_ln conf -state disabled
 		set diff_active 0
 		unlock_index
 		set scroll_pos [lindex $cont_info 0]
@@ -271,6 +288,8 @@ proc start_show_diff {cont_info {add_opts {}}} {
 	set is_submodule_diff 0
 	set diff_active 1
 	set current_diff_header {}
+	set ::diff_old_lno 0
+	set ::diff_new_lno 0
 	set conflict_size [gitattr $path conflict-marker-size 7]
 
 	set cmd [list]
@@ -359,11 +378,12 @@ proc parse_color_line {line} {
 }
 
 proc read_diff {fd conflict_size cont_info} {
-	global ui_diff diff_active is_submodule_diff
+	global ui_diff ui_diff_ln diff_active is_submodule_diff
 	global is_3way_diff is_conflict_diff current_diff_header
 	global current_diff_queue
 
 	$ui_diff conf -state normal
+	$ui_diff_ln conf -state normal
 	while {[gets $fd line] >= 0} {
 		foreach {line markup} [parse_color_line $line] break
 		set line [string map {\033 ^} $line]
@@ -496,12 +516,44 @@ proc read_diff {fd conflict_size cont_info} {
 			}
 			}
 		}
+		# -- Compute line number gutter text for 2-way diffs
+		set _ln_text {}
+		if {!$::current_diff_inheader \
+				&& $line ne {\ No newline at end of file} \
+				&& !$is_3way_diff && !$is_submodule_diff} {
+			switch -- [string index $line 0] {
+			{ } {
+				incr ::diff_old_lno
+				incr ::diff_new_lno
+				set _ln_text [format "%5d %5d" \
+					$::diff_old_lno $::diff_new_lno]
+			}
+			{@} {
+				if {[regexp \
+						{@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@} \
+						$line -> _o _n]} {
+					set ::diff_old_lno [expr {$_o - 1}]
+					set ::diff_new_lno [expr {$_n - 1}]
+				}
+			}
+			{-} {
+				incr ::diff_old_lno
+				set _ln_text [format "%5d      " $::diff_old_lno]
+			}
+			{+} {
+				incr ::diff_new_lno
+				set _ln_text [format "      %5d" $::diff_new_lno]
+			}
+			}
+		}
+
 		set mark [$ui_diff index "end - 1 line linestart"]
 		$ui_diff insert end $line $tags
 		if {[string index $line end] eq "\r"} {
 			$ui_diff tag add d_cr {end - 2c}
 		}
 		$ui_diff insert end "\n" $tags
+		$ui_diff_ln insert end "$_ln_text\n"
 
 		foreach {posbegin colbegin posend colend} $markup {
 			set prefix clr
@@ -515,6 +567,7 @@ proc read_diff {fd conflict_size cont_info} {
 		}
 	}
 	$ui_diff conf -state disabled
+	$ui_diff_ln conf -state disabled
 
 	if {[eof $fd]} {
 		close $fd
@@ -546,7 +599,7 @@ proc read_diff {fd conflict_size cont_info} {
 
 proc apply_or_revert_hunk {x y revert} {
 	global current_diff_path current_diff_header current_diff_side
-	global ui_diff ui_index file_states last_revert last_revert_enc
+	global ui_diff ui_diff_ln ui_index file_states last_revert last_revert_enc
 
 	if {$current_diff_path eq {} || $current_diff_header eq {}} return
 	if {![lock_index apply_hunk]} return
@@ -609,6 +662,10 @@ proc apply_or_revert_hunk {x y revert} {
 	$ui_diff conf -state normal
 	$ui_diff delete $s_lno $e_lno
 	$ui_diff conf -state disabled
+
+	$ui_diff_ln conf -state normal
+	$ui_diff_ln delete $s_lno $e_lno
+	$ui_diff_ln conf -state disabled
 
 	# Check if the hunk was the last one in the file.
 	if {[$ui_diff get 1.0 end] eq "\n"} {

@@ -3391,22 +3391,51 @@ bind .vpane.lower.diff.header.path <Button-1> {do_file_open $current_diff_path}
 # -- Diff Body
 #
 textframe .vpane.lower.diff.body
+set ui_diff_ln .vpane.lower.diff.body.ln
 set ui_diff .vpane.lower.diff.body.t
+
+proc diff_yscrollcmd {args} {
+	eval .vpane.lower.diff.body.sby set $args
+	.vpane.lower.diff.body.ln yview moveto [lindex $args 0]
+}
+proc diff_yview {args} {
+	eval .vpane.lower.diff.body.t yview $args
+	.vpane.lower.diff.body.ln yview moveto \
+		[lindex [.vpane.lower.diff.body.t yview] 0]
+}
+
+text $ui_diff_ln \
+	-borderwidth 0 \
+	-width 11 -height 5 -wrap none \
+	-font font_diff \
+	-state disabled \
+	-takefocus 0 \
+	-highlightthickness 0 \
+	-background #f0f0f0 \
+	-foreground #888888 \
+	-padx 4 \
+	-cursor {}
+bind $ui_diff_ln <MouseWheel> \
+	{diff_yview scroll [expr {-%D/120}] units; break}
+bind $ui_diff_ln <Button-4> {diff_yview scroll -1 units; break}
+bind $ui_diff_ln <Button-5> {diff_yview scroll  1 units; break}
+
 ttext $ui_diff \
 	-borderwidth 0 \
 	-width 80 -height 5 -wrap none \
 	-font font_diff \
 	-takefocus 1 -highlightthickness 1 \
 	-xscrollcommand {.vpane.lower.diff.body.sbx set} \
-	-yscrollcommand {.vpane.lower.diff.body.sby set} \
+	-yscrollcommand diff_yscrollcmd \
 	-state disabled
 catch {$ui_diff configure -tabstyle wordprocessor}
 ttk::scrollbar .vpane.lower.diff.body.sbx -orient horizontal \
 	-command [list $ui_diff xview]
 ttk::scrollbar .vpane.lower.diff.body.sby -orient vertical \
-	-command [list $ui_diff yview]
+	-command diff_yview
 pack .vpane.lower.diff.body.sbx -side bottom -fill x
 pack .vpane.lower.diff.body.sby -side right -fill y
+pack $ui_diff_ln -side left -fill y
 pack $ui_diff -side left -fill both -expand 1
 pack .vpane.lower.diff.header -side top -fill x
 pack .vpane.lower.diff.body -side bottom -fill both -expand 1
