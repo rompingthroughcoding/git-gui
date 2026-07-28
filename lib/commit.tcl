@@ -313,10 +313,6 @@ proc commit_commitmsg_wait {fd_ph curHEAD msg_p} {
 proc wash_commit_message {msg} {
 	# Strip trailing whitespace
 	regsub -all -line {[ \t\r]+$} $msg {} msg
-	# Strip comment lines
-	global comment_string
-	set cmt_rx [strcat {(^|\n)} [regsub -all {\W} $comment_string {\\&}] {[^\n]*}]
-	regsub -all $cmt_rx $msg {\1} msg
 	# Strip leading and trailing empty lines (puts adds one \n)
 	set msg [string trim $msg \n]
 	# Compress consecutive empty lines
