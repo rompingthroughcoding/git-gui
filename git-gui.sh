@@ -3325,7 +3325,7 @@ set ui_comm_ctxm $ctxm
 # -- Diff Header
 #
 proc trace_current_diff_path {varname args} {
-	global current_diff_path diff_actions file_states
+	global current_diff_path diff_actions file_states _gitworktree
 	if {$current_diff_path eq {}} {
 		set s {}
 		set f {}
@@ -3335,7 +3335,7 @@ proc trace_current_diff_path {varname args} {
 		set p $current_diff_path
 		set s [mapdesc [lindex $file_states($p) 0] $p]
 		set f [mc "File:"]
-		set p [escape_path $p]
+		set p [escape_path [file nativename [file join $_gitworktree $p]]]
 		set o normal
 	}
 
@@ -3379,7 +3379,7 @@ $ctxm add command \
 		clipboard append \
 			-format STRING \
 			-type STRING \
-			-- $current_diff_path
+			-- [file nativename [file join $_gitworktree $current_diff_path]]
 	}
 $ctxm add command \
 	-label [mc Open] \
