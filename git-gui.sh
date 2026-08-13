@@ -3372,6 +3372,12 @@ pack .vpane.lower.diff.header.file -side left
 pack .vpane.lower.diff.header.path -fill x
 set ctxm .vpane.lower.diff.header.ctxm
 menu $ctxm -tearoff 0
+proc copy_diff_path_unix {} {
+	global _gitworktree current_diff_path
+	clipboard clear
+	clipboard append -format STRING -type STRING \
+		-- [file join $_gitworktree $current_diff_path]
+}
 $ctxm add command \
 	-label [mc Copy] \
 	-command {
@@ -3382,11 +3388,22 @@ $ctxm add command \
 			-- [file nativename [file join $_gitworktree $current_diff_path]]
 	}
 $ctxm add command \
+	-label [mc "Copy Unix Path"] \
+	-command {copy_diff_path_unix}
+$ctxm add command \
 	-label [mc Open] \
 	-command {do_file_open $current_diff_path}
 lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
 bind_button3 .vpane.lower.diff.header.path "tk_popup $ctxm %X %Y"
 bind .vpane.lower.diff.header.path <Button-1> {do_file_open $current_diff_path}
+bind .vpane.lower.diff.header.path <Button-2> {
+	clipboard clear
+	clipboard append \
+		-format STRING \
+		-type STRING \
+		-- [file nativename [file join $_gitworktree $current_diff_path]]
+}
+bind .vpane.lower.diff.header.path <Double-Button-2> {copy_diff_path_unix}
 
 # -- Diff Body
 #
