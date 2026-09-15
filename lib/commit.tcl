@@ -115,12 +115,14 @@ proc do_signoff {} {
 
 proc create_new_commit {} {
 	global commit_type ui_comm commit_author
+	global force_prepare_commit_msg
 
 	set commit_type normal
 	unset -nocomplain commit_author
 	$ui_comm delete 0.0 end
 	$ui_comm edit reset
 	$ui_comm edit modified false
+	set force_prepare_commit_msg 1
 	rescan ui_ready
 }
 

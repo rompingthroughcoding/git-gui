@@ -750,6 +750,7 @@ if {[lsearch -exact [font names] TkDefaultFont] != -1} {
 		destroy .dummy
 	}
 }
+#font configure font_ui -size [expr {abs([font configure font_ui -size]) + 4}]
 
 font create font_uiitalic
 font create font_uibold
@@ -855,6 +856,7 @@ set default_config(gui.diffopts) {}
 set default_config(gui.commitmsgwidth) 75
 set default_config(gui.newbranchtemplate) {}
 set default_config(gui.spellingdictionary) {}
+set default_config(gui.browser) {}
 set default_config(gui.fontui) [font configure font_ui]
 set default_config(gui.fontdiff) [font configure font_diff]
 # TODO: this option should be added to the git-config documentation
@@ -996,8 +998,8 @@ proc _parse_config {arr_name args} {
 			[concat config \
 			$args \
 			--null --list]]
-		fconfigure $fd_rc -encoding utf-8
-		set buf [read $fd_rc]
+		fconfigure $fd_rc -encoding binary -translation binary
+		set buf [encoding convertfrom utf-8 [read $fd_rc]]
 		close $fd_rc
 	}
 	foreach line [split $buf "\0"] {
@@ -1223,6 +1225,7 @@ set PARENT {}
 set MERGE_HEAD [list]
 set commit_type {}
 set commit_type_is_amend 0
+set force_prepare_commit_msg 0
 set empty_tree {}
 set current_branch {}
 set is_detached 0
@@ -1335,6 +1338,7 @@ proc rescan {after {honor_trustmtime 1}} {
 	global ui_index ui_workdir ui_comm
 	global rescan_active file_states
 	global repo_config
+	global force_prepare_commit_msg
 
 	if {$rescan_active > 0 || ![lock_index read]} return
 
@@ -1350,6 +1354,14 @@ proc rescan {after {honor_trustmtime 1}} {
 	}
 
 	array unset file_states
+
+	if {$force_prepare_commit_msg} {
+		# Drop the saved/backed up message so the hook is reached below.
+		set force_prepare_commit_msg 0
+		set ::GITGUI_BCK_exists 0
+		catch {file delete [gitdir GITGUI_BCK]}
+		catch {file delete [gitdir GITGUI_MSG]}
+	}
 
 	if {!$::GITGUI_BCK_exists &&
 		(![$ui_comm edit modified]
@@ -2133,6 +2145,166 @@ proc do_file_open {file} {
 	set full_file_path [file join $_gitworktree $file]
 	lappend cmd [file nativename $full_file_path]
 	safe_exec_bg $cmd
+}
+
+# Split a gui.browser value into an exec command list.  Accepts a bare program
+# path (which may contain spaces), an optionally quoted path followed by
+# arguments, or a plain "program arg arg" string.  Backslashes are preserved.
+proc parse_browser_command {spec} {
+	set spec [string trim $spec]
+	if {$spec eq {}} {
+		return {}
+	}
+
+	set quote [string index $spec 0]
+	if {$quote eq {"} || $quote eq {'}} {
+		set close [string first $quote $spec 1]
+		if {$close > 0} {
+			set prog [string range $spec 1 [expr {$close - 1}]]
+			set rest [string trim [string range $spec [expr {$close + 1}] end]]
+			set cmd [list $prog]
+			if {$rest ne {}} {
+				foreach arg [regexp -all -inline {\S+} $rest] {
+					lappend cmd $arg
+				}
+			}
+			return $cmd
+		}
+	}
+
+	if {[file executable $spec]} {
+		return [list $spec]
+	}
+
+	set cmd {}
+	foreach arg [regexp -all -inline {\S+} $spec] {
+		lappend cmd $arg
+	}
+	return $cmd
+}
+
+# Open an URL with gui.browser, or the default associated app when unset.
+proc do_url_open {url} {
+	set cmd [parse_browser_command [get_config gui.browser]]
+	if {$cmd eq {}} {
+		if {[is_Cygwin]} {
+			set cmd [list /bin/cygstart.exe]
+		} else {
+			set cmd [get_explorer]
+		}
+	} else {
+		set prog [lindex $cmd 0]
+		if {[regexp {[/\\]} $prog] && ![file executable $prog]} {
+			error_popup [strcat \
+				[mc "The configured web browser cannot be run:"] \
+				"\n\n$prog\n\n" \
+				[mc "Check the gui.browser setting in Edit > Options."]]
+			return
+		}
+	}
+	lappend cmd $url
+	if {[catch {safe_exec_bg $cmd} err]} {
+		error_popup [strcat [mc "Failed to open the web browser:"] "\n\n$err"]
+	}
+}
+
+proc url_encode {str} {
+	set out {}
+	foreach ch [split $str {}] {
+		if {[string match {[A-Za-z0-9._~-]} $ch]} {
+			append out $ch
+		} else {
+			foreach byte [split [encoding convertto utf-8 $ch] {}] {
+				append out [format %%%02X [scan $byte %c]]
+			}
+		}
+	}
+	return $out
+}
+
+# Translate an Azure DevOps remote URL into the base web URL of the
+# repository.  Returns {} when the remote is not an Azure DevOps one.
+proc ado_repo_web_url {remote_url} {
+	set u [string trimright $remote_url /]
+	regsub {\.git$} $u {} u
+
+	# git@ssh.dev.azure.com:v3/<org>/<project>/<repo>
+	# ssh://git@ssh.dev.azure.com:22/v3/<org>/<project>/<repo>
+	if {[regexp -nocase \
+		{ssh\.dev\.azure\.com(?::[0-9]+)?[:/]v3/([^/]+)/([^/]+)/([^/]+)$} \
+		$u _ org project repo]} {
+		return "https://dev.azure.com/$org/$project/_git/$repo"
+	}
+
+	# https://<org>@dev.azure.com/<org>/<project>/_git/<repo>
+	if {[regexp -nocase \
+		{dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/]+)$} \
+		$u _ org project repo]} {
+		return "https://dev.azure.com/$org/$project/_git/$repo"
+	}
+
+	# https://<org>.visualstudio.com/[DefaultCollection/]<project>/_git/<repo>
+	if {[regexp -nocase \
+		{^[a-z+]+://(?:[^@/]+@)?([^./]+)\.visualstudio\.com/(?:DefaultCollection/)?([^/]+)/_git/([^/]+)$} \
+		$u _ org project repo]} {
+		return "https://dev.azure.com/$org/$project/_git/$repo"
+	}
+
+	return {}
+}
+
+# Build the Azure DevOps web URL showing $path at the checked out revision.
+proc ado_file_url {path} {
+	global repo_config current_branch is_detached
+
+	set remote {}
+	if {[info exists repo_config(remote.origin.url)]} {
+		set remote $repo_config(remote.origin.url)
+	} else {
+		foreach k [lsort [array names repo_config remote.*.url]] {
+			set remote $repo_config($k)
+			break
+		}
+	}
+	if {$remote eq {}} {
+		return {}
+	}
+
+	set base [ado_repo_web_url $remote]
+	if {$base eq {}} {
+		return {}
+	}
+
+	if {$is_detached} {
+		if {[catch {set version GC[git rev-parse HEAD]}]} {
+			return {}
+		}
+	} else {
+		set version GB$current_branch
+	}
+
+	return "$base?path=[url_encode /$path]&version=[url_encode $version]&_a=contents"
+}
+
+proc do_ado_open {path} {
+	if {$path eq {}} return
+	set url [ado_file_url $path]
+	if {$url eq {}} {
+		error_popup [mc "This repository has no Azure DevOps remote."]
+		return
+	}
+	do_url_open $url
+}
+
+proc do_ado_copy {path} {
+	if {$path eq {}} return
+	set url [ado_file_url $path]
+	if {$url eq {}} {
+		error_popup [mc "This repository has no Azure DevOps remote."]
+		return
+	}
+	clipboard clear
+	clipboard append -format STRING -type STRING -- $url
 }
 
 set is_quitting 0
@@ -3379,7 +3551,7 @@ proc copy_diff_path_unix {} {
 		-- [file join $_gitworktree $current_diff_path]
 }
 $ctxm add command \
-	-label [mc Copy] \
+	-label [mc "Copy Path"] \
 	-command {
 		clipboard clear
 		clipboard append \
@@ -3393,6 +3565,15 @@ $ctxm add command \
 $ctxm add command \
 	-label [mc Open] \
 	-command {do_file_open $current_diff_path}
+lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+$ctxm add separator
+$ctxm add command \
+	-label [mc "Open in Azure DevOps"] \
+	-command {do_ado_open $current_diff_path}
+lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+$ctxm add command \
+	-label [mc "Copy Azure DevOps Link"] \
+	-command {do_ado_copy $current_diff_path}
 lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
 bind_button3 .vpane.lower.diff.header.path "tk_popup $ctxm %X %Y"
 bind .vpane.lower.diff.header.path <Button-1> {do_file_open $current_diff_path}

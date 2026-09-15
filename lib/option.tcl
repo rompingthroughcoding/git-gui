@@ -157,6 +157,7 @@ proc do_options {} {
 		{t gui.diffopts {mc "Additional Diff Parameters"}}
 		{i-0..99 gui.commitmsgwidth {mc "Commit Message Text Width"}}
 		{t gui.newbranchtemplate {mc "New Branch Name Template"}}
+		{t gui.browser {mc "Web Browser Command For Links (blank for system default)"}}
 		{c gui.encoding {mc "Default File Contents Encoding"}}
 		{b gui.warndetachedcommit {mc "Warn before committing to a detached head"}}
 		{s gui.stageuntracked {mc "Staging of untracked files"} {list "yes" "no" "ask"}}
@@ -288,7 +289,13 @@ proc do_options {} {
 		pack $w.global.$name -side top -anchor w -fill x
 	}
 
-	bind $w <Visibility> "grab $w; focus $w.buttons.save"
+	# Unbind after the first exposure, otherwise every later <Visibility>
+	# event (e.g. an overlapping window closing) steals focus back.
+	bind $w <Visibility> "
+		[list bind $w <Visibility> {}]
+		grab $w
+		[list focus $w.buttons.save]
+	"
 	bind $w <Key-Escape> "destroy $w"
 	bind $w <Key-Return> [list do_save_config $w]
 
