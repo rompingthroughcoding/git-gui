@@ -1432,7 +1432,7 @@ proc rescan_stage2 {fd after} {
 	}
 }
 
-proc load_message {file {encoding {}}} {
+proc load_message {file {encoding {}} {keep_trailing_space 0}} {
 	global ui_comm
 
 	set f [gitdir $file]
@@ -1443,9 +1443,17 @@ proc load_message {file {encoding {}}} {
 		if {$encoding ne {}} {
 			fconfigure $fd -encoding $encoding
 		}
-		set content [string trim [read $fd]]
+		set content [read $fd]
 		close $fd
+		set tail {}
+		if {$keep_trailing_space} {
+			regexp {[ ]*$} [string trimright $content "\r\n"] tail
+		}
+		set content [string trim $content]
 		regsub -all -line {[ \r\t]+$} $content {} content
+		if {$content ne {}} {
+			append content $tail
+		}
 		$ui_comm delete 0.0 end
 		$ui_comm insert end $content
 		return 1
@@ -1515,7 +1523,7 @@ proc prepare_commit_msg_hook_wait {fd_ph} {
 			catch {file delete [gitdir PREPARE_COMMIT_MSG]}
 			exit 1
 		} else {
-			load_message PREPARE_COMMIT_MSG
+			load_message PREPARE_COMMIT_MSG {} 1
 		}
 		set pch_error {}
 		catch {file delete [gitdir PREPARE_COMMIT_MSG]}
