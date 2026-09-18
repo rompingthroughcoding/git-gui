@@ -4064,7 +4064,7 @@ set file_lists_last_clicked($ui_workdir) {}
 set file_lists($ui_index) [list]
 set file_lists($ui_workdir) [list]
 
-wm title . "[appname] ([reponame]) [file normalize $_gitworktree]"
+wm title . "[reponame] [file normalize $_gitworktree]"
 focus -force $ui_comm
 
 # -- Only initialize complex UI if we are going to stay running.
