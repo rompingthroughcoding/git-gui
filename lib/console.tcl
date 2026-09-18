@@ -9,6 +9,10 @@ field w
 field w_t
 field console_cr
 field is_toplevel    1; # are we our own window?
+field fit_pending    0; # is a resize already queued?
+field fit_placed     0; # have we positioned ourselves yet?
+field fit_scanned    0; # last line measured for its width
+field fit_cols       0; # widest line seen so far
 
 constructor new {short_title long_title} {
 	set t_short $short_title
@@ -90,6 +94,87 @@ method _init {} {
 	bind $w_t <$M1B-Key-A> "$w_t tag add sel 0.0 end;break"
 }
 
+# Largest area {x y width height} this window may occupy while the diff
+# file name header and the commit message box of the main window stay
+# visible underneath it.
+method _fit_area {} {
+	set pad 10
+	set hdr .vpane.lower.diff.header
+	set cmt .vpane.lower.commarea
+
+	if {[winfo exists $hdr] && [winfo ismapped $hdr]
+	 && [winfo exists $cmt] && [winfo ismapped $cmt]} {
+		set x [expr {[winfo rootx .] + $pad}]
+		set y [expr {[winfo rooty $hdr] + [winfo height $hdr] + $pad}]
+		return [list $x $y \
+			[expr {[winfo width .] - 2 * $pad}] \
+			[expr {[winfo rooty $cmt] - $pad - $y}]]
+	}
+
+	set sw [winfo screenwidth .]
+	set sh [winfo screenheight .]
+	set width [expr {$sw * 3 / 4}]
+	set height [expr {$sh * 3 / 4}]
+	return [list \
+		[expr {($sw - $width) / 2}] \
+		[expr {($sh - $height) / 2}] \
+		$width $height]
+}
+
+method _fit {} {
+	set fit_pending 0
+	if {!$is_toplevel || ![winfo exists $w_t]} return
+
+	set top [winfo toplevel $w_t]
+	set rows [expr {int([$w_t index {end - 1 c}])}]
+
+	# Re-measure the last known line, \r rewrites may have changed it.
+	for {set i [expr {$fit_scanned > 0 ? $fit_scanned : 1}]} \
+		{$i <= $rows} {incr i} {
+		set len [string length [$w_t get $i.0 "$i.0 lineend"]]
+		if {$len > $fit_cols} {set fit_cols $len}
+	}
+	set fit_scanned $rows
+
+	set cw [font measure font_diff -displayof $w_t 0]
+	set lh [font metrics font_diff -displayof $w_t -linespace]
+	if {$cw < 1} {set cw 1}
+	if {$lh < 1} {set lh 1}
+
+	set area [_fit_area $this]
+	set over_w [expr {[winfo reqwidth $top] - [winfo reqwidth $w_t]}]
+	set over_h [expr {[winfo reqheight $top] - [winfo reqheight $w_t]}]
+	if {$over_w < 0} {set over_w 0}
+	if {$over_h < 0} {set over_h 0}
+	# Allowance for the window manager's title bar and borders.
+	incr over_h 40
+
+	set max_cols [expr {([lindex $area 2] - $over_w) / $cw}]
+	set max_rows [expr {([lindex $area 3] - $over_h) / $lh}]
+	if {$max_cols < 80} {set max_cols 80}
+	if {$max_rows < 10} {set max_rows 10}
+
+	set cols [expr {$fit_cols + 1}]
+	if {$cols < 80} {set cols 80}
+	if {$cols > $max_cols} {set cols $max_cols}
+	if {$rows < 10} {set rows 10}
+	if {$rows > $max_rows} {set rows $max_rows}
+
+	if {$cols == [$w_t cget -width] && $rows == [$w_t cget -height]} return
+	$w_t conf -width $cols -height $rows
+
+	if {!$fit_placed} {
+		set fit_placed 1
+		wm geometry $top +[lindex $area 0]+[lindex $area 1]
+	}
+} ifdeleted {return}
+
+method _sched_fit {} {
+	if {!$is_toplevel || $fit_pending} return
+	set fit_pending 1
+	after idle [cb _fit]
+}
+
 method exec {cmd {after {}}} {
 	if {[lindex $cmd 0] eq {git}} {
 		set fd_f [git_read [lrange $cmd 1 end] [list 2>@1]]
@@ -128,6 +213,7 @@ method _read {fd after} {
 		}
 		$w_t conf -state disabled
 		$w_t see end
+		_sched_fit $this
 	}
 
 	fconfigure $fd -blocking 1
@@ -175,6 +261,7 @@ method insert {txt} {
 	$w_t insert end "$txt\n"
 	set console_cr [$w_t index {end -1c}]
 	$w_t conf -state disabled
+	_sched_fit $this
 }
 
 method done {ok} {
