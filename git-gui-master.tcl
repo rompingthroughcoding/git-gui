@@ -272,8 +272,8 @@ proc open_tool_tab {hwnd label pid} {
 
 # -- tabs ---------------------------------------------------------------------
 
-proc open_repo {path {name {}}} {
-	global TAB TAB_SEQ MODE TAB_TOOLS
+proc open_repo {path {name {}} {select 1}} {
+	global TAB TAB_SEQ MODE
 
 	set path [file normalize $path]
 	if {![is_git_repo $path]} {
@@ -301,13 +301,36 @@ proc open_repo {path {name {}}} {
 		frame $f -width 1000 -height 640
 	}
 	.nb add $f -text " $name "
-	.nb select $f
-	update
+
+	# Defer the actual git-gui launch until the tab is first viewed, so opening
+	# several repos at once does not spawn every git-gui process up front.
+	set TAB($f) [dict create pid 0 path $path name $name mode $mode \
+		seq $TAB_SEQ opened [clock milliseconds] pending 1]
+	remember_recent $path
+	if {$mode ne {embed}} { build_pending_placeholder $f $path }
+
+	if {$select} { .nb select $f ; after idle [list ensure_launched $f] }
+}
+
+# Perform the deferred git-gui launch for a pending tab the first time it is
+# viewed. Idempotent: a no-op once the tab has been launched.
+proc ensure_launched {f} {
+	global TAB TAB_TOOLS
+	if {![info exists TAB($f)]} { return }
+	if {![dict get $TAB($f) pending]} { return }
+	set d $TAB($f)
+	dict set d pending 0
+	set TAB($f) $d
+	set path [dict get $d path]
+	set mode [dict get $d mode]
+	set seq  [dict get $d seq]
+	catch {destroy $f.pending}
+	update idletasks
 
 	switch -- $mode {
 	embed {
 		if {[catch {launch_embedded [winfo id $f] $path} pid]} {
-			_open_failed $f $pid ; return
+			unset -nocomplain TAB($f) ; _open_failed $f $pid ; return
 		}
 	}
 	dock {
@@ -315,16 +338,16 @@ proc open_repo {path {name {}}} {
 		update idletasks
 		set reqfile {}
 		if {$TAB_TOOLS} {
-			set reqfile [file join [_temp_dir] dockreq-$TAB_SEQ.txt]
+			set reqfile [file join [_temp_dir] dockreq-$seq.txt]
 			catch {file delete $reqfile}
 			set ::env(GIT_GUI_DOCK_REQUESTS) $reqfile
 		}
 		if {[catch {launch_separate $path 1} pid]} {
 			unset -nocomplain ::env(GIT_GUI_DOCK_REQUESTS)
-			_open_failed $f $pid ; return
+			unset -nocomplain TAB($f) ; _open_failed $f $pid ; return
 		}
 		unset -nocomplain ::env(GIT_GUI_DOCK_REQUESTS)
-		set status [file join [_temp_dir] dock-$TAB_SEQ.txt]
+		set status [file join [_temp_dir] dock-$seq.txt]
 		catch {file delete $status}
 		catch {launch_overlay_helper $pid \
 			[expr {[winfo id .]}] [expr {[winfo id $host]}] $status}
@@ -335,15 +358,17 @@ proc open_repo {path {name {}}} {
 	default {
 		set mode separate
 		if {[catch {launch_separate $path} pid]} {
-			_open_failed $f $pid ; return
+			unset -nocomplain TAB($f) ; _open_failed $f $pid ; return
 		}
 		build_separate_placeholder $f $path
 	}
 	}
 
-	set TAB($f) [dict create pid $pid path $path name $name \
-		mode $mode opened [clock milliseconds]]
-	remember_recent $path
+	set d $TAB($f)
+	dict set d pid $pid
+	dict set d mode $mode
+	dict set d opened [clock milliseconds]
+	set TAB($f) $d
 
 	# Windows Tk does not send the freshly embedded child a size event on
 	# attach, so it never paints. Nudge the toplevel geometry a few times to
@@ -351,6 +376,11 @@ proc open_repo {path {name {}}} {
 	if {$mode eq {embed}} {
 		foreach ms {600 1400 2600} { after $ms nudge_repaint }
 	}
+}
+
+proc on_tab_changed {} {
+	set cur [.nb select]
+	if {$cur ne {} && [info exists ::TAB($cur)]} { ensure_launched $cur }
 }
 
 proc _open_failed {f msg} {
@@ -387,8 +417,22 @@ proc nudge_repaint {} {
 	wm geometry . "${w}x${h}"
 }
 
+# Lightweight placeholder shown in a tab until its git-gui is launched on first
+# view. Not used for embed tabs (a -container frame cannot hold widgets).
+proc build_pending_placeholder {f path} {
+	set p [frame $f.pending]
+	pack $p -expand 1 -fill both
+	set c [frame $p.c]
+	place $c -relx 0.5 -rely 0.45 -anchor center
+	label $c.t -text [file tail $path] \
+		-font [list [font actual TkDefaultFont -family] 13 bold]
+	label $c.s -text "Loading\u2026" -fg gray40
+	pack $c.t -pady {0 4}
+	pack $c.s
+	return $p
+}
+
 proc build_separate_placeholder {f path} {
-	global TAB
 	set box [frame $f.box]
 	pack $box -expand 1 -fill both
 	set c [frame $box.c]
@@ -451,6 +495,13 @@ proc open_explorer {path} {
 proc close_tab {f} {
 	global TAB BRANCH_CACHE
 	if {![info exists TAB($f)]} { return }
+	if {[dict exists $TAB($f) pending] && [dict get $TAB($f) pending]} {
+		catch {.nb forget $f}
+		catch {destroy $f}
+		unset TAB($f)
+		catch {refresh_recent}
+		return
+	}
 	if {[dict get $TAB($f) mode] eq {tool}} {
 		# The overlay helper closes the tool window when its host is destroyed.
 		catch {.nb forget $f}
@@ -491,6 +542,10 @@ proc poll_children {} {
 				catch {destroy $f}
 				unset TAB($f)
 			}
+			continue
+		}
+		# Not yet launched (deferred until first viewed) — nothing to poll.
+		if {[dict exists $TAB($f) pending] && [dict get $TAB($f) pending]} {
 			continue
 		}
 		set pid [dict get $TAB($f) pid]
@@ -1100,6 +1155,7 @@ menu .tabmenu -tearoff 0
 
 bind .nb <Button-2>       {on_tab_middle %x %y}
 bind .nb <ButtonPress-3>  {on_tab_context %x %y %X %Y}
+bind .nb <<NotebookTabChanged>> on_tab_changed
 bind . <Control-w>        close_current_tab
 bind . <Control-W>        close_current_tab
 bind . <Control-o>        browse_open
@@ -1118,12 +1174,18 @@ if {$MODE eq {dock}} { after idle ensure_overlay_daemon }
 
 # Open any repositories passed on the command line.
 # Flags: --dock / --embed / --separate select the presentation mode.
+set _first 1
 foreach arg $argv {
 	switch -- $arg {
 		-- {}
 		--dock     { set MODE dock }
 		--embed    { set MODE embed }
 		--separate { set MODE separate }
-		default { if {[file isdirectory $arg]} { open_repo $arg } }
+		default {
+			if {[file isdirectory $arg]} {
+				open_repo $arg {} $_first
+				set _first 0
+			}
+		}
 	}
 }
