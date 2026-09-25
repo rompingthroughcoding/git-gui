@@ -377,6 +377,12 @@ set _githtmldir {}
 set _reponame {}
 set _shellpath {@@SHELL_PATH@@}
 
+# Set by git-gui-master when this instance is reparented into a container
+# tab via wish -use; suppresses wm geometry/state restore that would
+# otherwise detach the window from its container.
+set _embedded [expr {[info exists env(GIT_GUI_EMBEDDED)] \
+	&& $env(GIT_GUI_EMBEDDED) ne {}}]
+
 set _trace [lsearch -exact $argv --trace]
 if {$_trace >= 0} {
 	set argv [lreplace $argv $_trace $_trace]
@@ -690,7 +696,7 @@ proc rmsel_tag {text} {
 	return $text
 }
 
-wm withdraw .
+if {!$_embedded} { wm withdraw . }
 set root_exists 0
 bind . <Visibility> {
 	bind . <Visibility> {}
@@ -3218,7 +3224,7 @@ blame {
 		set current_branch $head
 	}
 
-	wm deiconify .
+	if {!$_embedded} { wm deiconify . }
 	switch -- $subcommand {
 	browser {
 		if {$jump_spec ne {}} usage
@@ -3949,14 +3955,14 @@ proc on_application_mapped {} {
 		[list on_ttk_pane_mapped %W 0 [lindex $gm 2]]
 	wm geometry . [lindex $gm 0]
 }
-if {[info exists repo_config(gui.geometry)]} {
+if {[info exists repo_config(gui.geometry)] && !$_embedded} {
 	bind . <Map> [list on_application_mapped]
 	wm geometry . [lindex $repo_config(gui.geometry) 0]
 }
 
 # -- Load window state
 #
-if {[info exists repo_config(gui.wmstate)]} {
+if {[info exists repo_config(gui.wmstate)] && !$_embedded} {
 	catch {wm state . $repo_config(gui.wmstate)}
 }
 
@@ -4205,6 +4211,45 @@ if {$picked && [is_config_true gui.autoexplore]} {
 
 # Clear "Initializing..." status
 after 500 {$main_status show ""}
+
+# When docked, report new NON-modal tool windows (blame/browser/console) to the
+# master so it can pull them into their own tabs. Modal dialogs hold a grab and
+# are left floating.
+proc _dock_toplevels {} {
+	set res {}
+	foreach w [winfo children .] {
+		if {[winfo toplevel $w] eq $w} { lappend res $w }
+	}
+	return $res
+}
+proc _dock_register {top} {
+	if {![winfo exists $top]} return
+	if {![winfo ismapped $top]} { after 300 [list _dock_register $top]; return }
+	if {[grab status $top] ne {none}} return
+	if {[grab current] eq $top} return
+	set label [wm title $top]
+	if {$label eq {}} { set label [string trimleft $top .] }
+	catch {
+		set fh [open $::env(GIT_GUI_DOCK_REQUESTS) a]
+		# Report the decorative wrapper (wm frame), not the inner content
+		# window (winfo id) - the wrapper is the real top-level to dock.
+		puts $fh "[wm frame $top]\t$label"
+		close $fh
+	}
+}
+proc _dock_scan {} {
+	global _dock_seen
+	foreach top [_dock_toplevels] {
+		if {[lsearch -exact $_dock_seen $top] >= 0} continue
+		lappend _dock_seen $top
+		after 150 [list _dock_register $top]
+	}
+	after 350 _dock_scan
+}
+if {$_embedded && [info exists env(GIT_GUI_DOCK_REQUESTS)]} {
+	set _dock_seen {}
+	after 400 _dock_scan
+}
 
 # Local variables:
 # mode: tcl
