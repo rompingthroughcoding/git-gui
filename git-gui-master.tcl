@@ -1002,6 +1002,10 @@ wm protocol . WM_DELETE_WINDOW do_quit
 build_home
 after 2000 poll_children
 
+# Pre-warm the overlay daemon while the user looks at Home, so the first repo
+# docks instantly instead of waiting for its one-time Win32 Add-Type compile.
+if {$MODE eq {dock}} { after idle ensure_overlay_daemon }
+
 # Open any repositories passed on the command line.
 # Flags: --dock / --embed / --separate select the presentation mode.
 foreach arg $argv {
