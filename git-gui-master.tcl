@@ -404,6 +404,7 @@ proc build_dock_frame {f path} {
 	label  $tb.p -text $path -anchor w -fg gray40
 	button $tb.x -text "Close" -command [list close_tab $f]
 	pack $tb.x -side right -padx 4 -pady 2
+	tooltip $tb.x "Close this repository tab and its git-gui window"
 	pack $tb.p -side left -padx 6
 	set host [frame $f.host -background gray85]
 	pack $host -side top -expand 1 -fill both
@@ -450,6 +451,9 @@ proc build_separate_placeholder {f path} {
 	button $btns.e -text "Open in Explorer" -command [list open_explorer $path]
 	button $btns.x -text "Close repository" -command [list close_tab $f]
 	pack $btns.r $btns.e $btns.x -side left -padx 4
+	tooltip $btns.r "Re-read this repo's branch and working-tree status"
+	tooltip $btns.e "Open this repository folder in the file manager"
+	tooltip $btns.x "Close this repository tab and its git-gui window"
 
 	pack $c.t -pady {0 4}
 	pack $c.p -pady {0 2}
@@ -1049,6 +1053,48 @@ proc home_context {x y X Y} {
 	tk_popup .homemenu $X $Y
 }
 
+# --- simple hover tooltips ---------------------------------------------------
+
+proc tooltip {w text} {
+	global TIP
+	set TIP($w) $text
+	bind $w <Enter> [list _tip_schedule %W]
+	bind $w <Leave> [list _tip_hide]
+	bind $w <ButtonPress> [list _tip_hide]
+}
+
+proc _tip_schedule {w} {
+	global TIP
+	if {![info exists TIP($w)]} { return }
+	_tip_hide
+	set ::_TIP_AFTER [after 600 [list _tip_show $w]]
+}
+
+proc _tip_hide {} {
+	if {[info exists ::_TIP_AFTER]} {
+		after cancel $::_TIP_AFTER
+		unset ::_TIP_AFTER
+	}
+	catch {destroy .tip}
+}
+
+proc _tip_show {w} {
+	global TIP
+	catch {unset ::_TIP_AFTER}
+	if {![winfo exists $w] || ![info exists TIP($w)]} { return }
+	catch {destroy .tip}
+	set t [toplevel .tip -borderwidth 0]
+	wm overrideredirect $t 1
+	catch {wm attributes $t -topmost 1}
+	label $t.l -text $TIP($w) -background #ffffe0 -foreground black \
+		-borderwidth 1 -relief solid -padx 5 -pady 2 -justify left
+	pack $t.l
+	set x [expr {[winfo pointerx $w] + 12}]
+	set y [expr {[winfo pointery $w] + 18}]
+	wm geometry $t +$x+$y
+	raise $t
+}
+
 proc build_home {} {
 	set h [frame .nb.home]
 	.nb add $h -text " Home "
@@ -1060,12 +1106,16 @@ proc build_home {} {
 	pack $head.title -side left
 	button $head.open -text "Open Folder\u2026" -command browse_open
 	pack $head.open -side right
+	tooltip $head.open "Browse for a Git repository folder and open it in a tab"
 	button $head.refresh -text "Refresh" -command home_refresh_all
 	pack $head.refresh -side right -padx {0 6}
+	tooltip $head.refresh "Reload the list and re-read each repo's branch and status (no network)"
 	button $head.live -text "Check remotes" -command check_all_remotes
 	pack $head.live -side right -padx {0 6}
+	tooltip $head.live "Fetch every repo from its remote, then update ahead/behind status"
 	button $head.pull -text "Pull behind" -command pull_all_behind
 	pack $head.pull -side right -padx {0 6}
+	tooltip $head.pull "Fast-forward pull every repo that is behind on trunk/master/main/production"
 	label $head.prog -fg gray40 -text ""
 	pack $head.prog -side right -padx {0 10}
 
