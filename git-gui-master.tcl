@@ -368,6 +368,9 @@ proc ensure_launched {f} {
 	dict set d pid $pid
 	dict set d mode $mode
 	dict set d opened [clock milliseconds]
+	# Docked tabs are watched by the overlay daemon via this status file, so
+	# poll_children can check it instead of spawning tasklist every cycle.
+	if {[info exists status]} { dict set d status $status }
 	set TAB($f) $d
 
 	# Windows Tk does not send the freshly embedded child a size event on
@@ -532,9 +535,15 @@ proc close_current_tab {} {
 proc poll_children {} {
 	global TAB
 	foreach f [array names TAB] {
-		# Tool tabs share the repo's pid; they close when the helper reports the
-		# tool window is gone (status file says "closed").
-		if {[dict get $TAB($f) mode] eq {tool}} {
+		# Not yet launched (deferred until first viewed) — nothing to poll.
+		if {[dict exists $TAB($f) pending] && [dict get $TAB($f) pending]} {
+			continue
+		}
+		# Docked repo tabs and tool tabs are managed by the overlay daemon, which
+		# writes "closed" to their status file when the window is gone (on normal
+		# exit or early crash). Reading that file avoids a synchronous tasklist
+		# spawn per tab every cycle.
+		if {[dict exists $TAB($f) status]} {
 			set closed 0
 			if {![catch {set fh [open [dict get $TAB($f) status] r]}]} {
 				set c [read $fh]
@@ -545,13 +554,11 @@ proc poll_children {} {
 				catch {.nb forget $f}
 				catch {destroy $f}
 				unset TAB($f)
+				catch {refresh_recent}
 			}
 			continue
 		}
-		# Not yet launched (deferred until first viewed) — nothing to poll.
-		if {[dict exists $TAB($f) pending] && [dict get $TAB($f) pending]} {
-			continue
-		}
+		# Separate / embedded tabs have no daemon: fall back to a liveness check.
 		set pid [dict get $TAB($f) pid]
 		if {[pid_alive $pid]} { continue }
 		set opened [dict get $TAB($f) opened]
