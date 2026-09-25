@@ -826,27 +826,135 @@ proc home_insert {tv path pinned i} {
 	$tv insert {} end -values [list $glyph $path $br $st] -tags $tags
 }
 
-# Fill branch/status one repo per event-loop tick so the list stays responsive.
+# Parse the first line of `git status -sb --porcelain` into {branch status}.
+# Example lines:
+#   ## master...origin/master [ahead 1, behind 2]
+#   ## master...origin/master            (up to date)
+#   ## master                            (no upstream)
+#   ## HEAD (no branch)                  (detached)
+proc parse_status_sb {line} {
+	if {![string match {## *} $line]} { return [list ? {}] }
+	set rest [string range $line 3 end]
+	set ab {}
+	set idx [string first { [} $rest]
+	if {$idx >= 0} {
+		set ab [string trimright [string range $rest [expr {$idx+2}] end] {]}]
+		set rest [string range $rest 0 [expr {$idx-1}]]
+	}
+	set hasup 0
+	set branch $rest
+	set dots [string first {...} $rest]
+	if {$dots >= 0} {
+		set branch [string range $rest 0 [expr {$dots-1}]]
+		set hasup 1
+	}
+	if {[string match {HEAD (no branch)*} $branch]} { set branch HEAD }
+	set ahead 0 ; set behind 0
+	regexp {ahead (\d+)} $ab -> ahead
+	regexp {behind (\d+)} $ab -> behind
+	if {!$hasup} { return [list $branch {}] }
+	if {$ahead == 0 && $behind == 0} { return [list $branch "\u2713 up to date"] }
+	if {$behind == 0} { return [list $branch "\u2191$ahead ahead"] }
+	if {$ahead == 0} { return [list $branch "\u2193$behind behind"] }
+	return [list $branch "\u2191$ahead \u2193$behind"]
+}
+
+# Local (no-network) branch + ahead/behind in a single async git process.
+proc async_branch_status {path done_cmd} {
+	set cmd [list git -C $path status -sb --porcelain]
+	if {[catch {set chan [open "|$cmd" r]}]} {
+		after 0 [list {*}$done_cmd [list ? {}]]
+		return
+	}
+	fconfigure $chan -blocking 0
+	set ::_bs_buf($chan) {}
+	fileevent $chan readable [list _bs_drain $chan $done_cmd]
+}
+
+proc _bs_drain {chan done_cmd} {
+	append ::_bs_buf($chan) [read $chan]
+	if {![eof $chan]} { return }
+	fileevent $chan readable {}
+	catch {close $chan}
+	set data $::_bs_buf($chan)
+	unset -nocomplain ::_bs_buf($chan)
+	set first [lindex [split $data \n] 0]
+	uplevel #0 [list {*}$done_cmd [parse_status_sb $first]]
+}
+
+# Fill branch/status with bounded concurrency (4 git processes at a time) so a
+# large recent list populates in parallel without blocking the UI.
 proc home_fill_status {{items {}}} {
-	global BRANCH_CACHE
+	global FILL_QUEUE FILL_ACTIVE
 	set tv .nb.home.list.tv
 	if {![winfo exists $tv]} { return }
 	if {$items eq {}} { set items [$tv children {}] }
-	if {$items eq {}} { return }
-	set item [lindex $items 0]
-	set rest [lrange $items 1 end]
-	if {[$tv exists $item]} {
-		set vals [$tv item $item -values]
-		set path [lindex $vals 1]
-		if {$path ne {}} {
-			if {![info exists BRANCH_CACHE($path)]} {
-				set BRANCH_CACHE($path) [repo_branch_status $path]
-			}
-			lassign $BRANCH_CACHE($path) br st
-			$tv item $item -values [list [lindex $vals 0] $path $br $st]
-		}
+	set FILL_QUEUE {}
+	foreach item $items {
+		if {![$tv exists $item]} { continue }
+		set path [lindex [$tv item $item -values] 1]
+		if {$path ne {}} { lappend FILL_QUEUE $path }
 	}
-	if {$rest ne {}} { after 1 [list home_fill_status $rest] }
+	set FILL_ACTIVE 0
+	if {$FILL_QUEUE eq {}} { return }
+	for {set i 0} {$i < 4} {incr i} { _fill_pump }
+}
+
+proc _fill_pump {} {
+	global FILL_QUEUE FILL_ACTIVE
+	if {$FILL_QUEUE eq {}} { return }
+	set path [lindex $FILL_QUEUE 0]
+	set FILL_QUEUE [lrange $FILL_QUEUE 1 end]
+	incr FILL_ACTIVE
+	async_branch_status $path [list _fill_done $path]
+}
+
+proc _fill_done {path bs} {
+	global BRANCH_CACHE FILL_ACTIVE FILL_QUEUE
+	set BRANCH_CACHE($path) $bs
+	_home_apply_cached $path
+	incr FILL_ACTIVE -1
+	_fill_pump
+	if {$FILL_ACTIVE <= 0 && $FILL_QUEUE eq {}} { save_status_cache }
+}
+
+# --- persist branch/status across sessions -----------------------------------
+
+proc status_cache_file {} {
+	if {[info exists ::env(USERPROFILE)]} {
+		set base $::env(USERPROFILE)
+	} elseif {[info exists ::env(HOME)]} {
+		set base $::env(HOME)
+	} else {
+		set base [pwd]
+	}
+	return [file join $base .git-gui-master-status]
+}
+
+proc save_status_cache {} {
+	global BRANCH_CACHE
+	if {[catch {open [status_cache_file] w} ch]} { return }
+	fconfigure $ch -encoding utf-8
+	foreach k [array names BRANCH_CACHE] {
+		catch {puts $ch [list $k $BRANCH_CACHE($k)]}
+	}
+	catch {close $ch}
+}
+
+proc load_status_cache {} {
+	global BRANCH_CACHE
+	set f [status_cache_file]
+	if {![file exists $f]} { return }
+	if {[catch {open $f r} ch]} { return }
+	fconfigure $ch -encoding utf-8
+	set data [read $ch]
+	catch {close $ch}
+	foreach line [split $data \n] {
+		if {[string trim $line] eq {}} { continue }
+		if {[catch {llength $line}]} { continue }
+		set k [lindex $line 0]
+		if {$k ne {}} { set BRANCH_CACHE($k) [lindex $line 1] }
+	}
 }
 
 proc home_refresh_all {} {
@@ -974,6 +1082,7 @@ proc build_menu {} {
 }
 
 proc do_quit {} {
+	catch {save_status_cache}
 	foreach f [array names ::TAB] {
 		kill_pid [dict get $::TAB($f) pid]
 	}
@@ -999,6 +1108,7 @@ bind . <Control-q>        do_quit
 bind . <Control-Q>        do_quit
 wm protocol . WM_DELETE_WINDOW do_quit
 
+load_status_cache
 build_home
 after 2000 poll_children
 
