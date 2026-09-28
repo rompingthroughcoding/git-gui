@@ -872,7 +872,24 @@ proc refresh_recent {} {
 		home_insert $tv $p 0 $i
 		incr i
 	}
+	home_autofit_repo
 	after idle home_fill_status
+}
+
+# Size the repo column to the widest repo path plus a little padding, so it
+# hugs the content and leaves the rest of the width to the branch column.
+proc home_autofit_repo {} {
+	set tv .nb.home.list.tv
+	if {![winfo exists $tv]} { return }
+	set fam [font actual TkDefaultFont -family]
+	set sz  [font actual TkDefaultFont -size]
+	set fnt [list $fam $sz bold]
+	set maxw [font measure $fnt "Repository"]
+	foreach it [$tv children {}] {
+		set w [font measure $fnt [lindex [$tv item $it -values] 1]]
+		if {$w > $maxw} { set maxw $w }
+	}
+	$tv column repo -width [expr {$maxw + 28}]
 }
 
 proc home_insert {tv path pinned i} {
@@ -1145,9 +1162,9 @@ proc build_home {} {
 	$list.tv heading branch -text "Branch" -anchor w
 	$list.tv heading upstat -text "Status" -anchor w
 	$list.tv column status -width 52 -minwidth 52 -stretch 0 -anchor center
-	$list.tv column repo -width 300 -anchor w
-	$list.tv column branch -width 160 -anchor w -stretch 0
-	$list.tv column upstat -width 120 -anchor w -stretch 0
+	$list.tv column repo -width 200 -minwidth 120 -stretch 0 -anchor w
+	$list.tv column branch -width 220 -minwidth 160 -anchor w -stretch 1
+	$list.tv column upstat -width 120 -minwidth 100 -anchor w -stretch 0
 	$list.tv tag configure even -background #ffffff
 	$list.tv tag configure odd -background #eef2f7
 	$list.tv tag configure pinned -font [list $fam $sz bold]
