@@ -3337,53 +3337,61 @@ ttk::panedwindow .vpane.files -orient vertical
 .vpane add .vpane.files
 pack .vpane -anchor n -side top -fill both -expand 1
 
-# -- Working Directory File List
-
-textframe .vpane.files.workdir -height 100 -width 200
-tlabel .vpane.files.workdir.title -text [mc "Unstaged Changes"] \
-	-background lightsalmon -foreground black
-ttext $ui_workdir \
-	-borderwidth 0 \
-	-width 20 -height 10 \
-	-wrap none \
-	-takefocus 1 -highlightthickness 1\
-	-cursor $cursor_ptr \
-	-xscrollcommand {.vpane.files.workdir.sx set} \
-	-yscrollcommand {.vpane.files.workdir.sy set} \
-	-state disabled
-ttk::scrollbar .vpane.files.workdir.sx -orient h -command [list $ui_workdir xview]
-ttk::scrollbar .vpane.files.workdir.sy -orient v -command [list $ui_workdir yview]
-pack .vpane.files.workdir.title -side top -fill x
-pack .vpane.files.workdir.sx -side bottom -fill x
-pack .vpane.files.workdir.sy -side right -fill y
-pack $ui_workdir -side left -fill both -expand 1
-
-# -- Index File List
+# -- Working Directory and Index File Lists
 #
-textframe .vpane.files.index -height 100 -width 200
-tlabel .vpane.files.index.title \
-	-text [mc "Staged Changes (Will Commit)"] \
-	-background lightgreen -foreground black
-ttext $ui_index \
-	-borderwidth 0 \
-	-width 20 -height 10 \
-	-wrap none \
-	-takefocus 1 -highlightthickness 1\
-	-cursor $cursor_ptr \
-	-xscrollcommand {.vpane.files.index.sx set} \
-	-yscrollcommand {.vpane.files.index.sy set} \
-	-state disabled
-ttk::scrollbar .vpane.files.index.sx -orient h -command [list $ui_index xview]
-ttk::scrollbar .vpane.files.index.sy -orient v -command [list $ui_index yview]
-pack .vpane.files.index.title -side top -fill x
-pack .vpane.files.index.sx -side bottom -fill x
-pack .vpane.files.index.sy -side right -fill y
-pack $ui_index -side left -fill both -expand 1
+# Multi-repo fork spike: both panes are built by a proc that takes an arbitrary
+# parent $w and points the ui_workdir/ui_index path globals at it. In a fork $w
+# is each repo's tab frame; here it is the shared .vpane.files. The rest of the
+# code reaches these widgets only through the ui_* globals, so this is all that
+# is needed to make the file lists per-repo.
+proc build_file_lists {w} {
+	global ui_workdir ui_index cursor_ptr
+	set ui_workdir $w.workdir.list
+	set ui_index   $w.index.list
 
-# -- Insert the workdir and index into the panes
-#
-.vpane.files add .vpane.files.workdir
-.vpane.files add .vpane.files.index
+	textframe $w.workdir -height 100 -width 200
+	tlabel $w.workdir.title -text [mc "Unstaged Changes"] \
+		-background lightsalmon -foreground black
+	ttext $ui_workdir \
+		-borderwidth 0 \
+		-width 20 -height 10 \
+		-wrap none \
+		-takefocus 1 -highlightthickness 1\
+		-cursor $cursor_ptr \
+		-xscrollcommand [list $w.workdir.sx set] \
+		-yscrollcommand [list $w.workdir.sy set] \
+		-state disabled
+	ttk::scrollbar $w.workdir.sx -orient h -command [list $ui_workdir xview]
+	ttk::scrollbar $w.workdir.sy -orient v -command [list $ui_workdir yview]
+	pack $w.workdir.title -side top -fill x
+	pack $w.workdir.sx -side bottom -fill x
+	pack $w.workdir.sy -side right -fill y
+	pack $ui_workdir -side left -fill both -expand 1
+
+	textframe $w.index -height 100 -width 200
+	tlabel $w.index.title \
+		-text [mc "Staged Changes (Will Commit)"] \
+		-background lightgreen -foreground black
+	ttext $ui_index \
+		-borderwidth 0 \
+		-width 20 -height 10 \
+		-wrap none \
+		-takefocus 1 -highlightthickness 1\
+		-cursor $cursor_ptr \
+		-xscrollcommand [list $w.index.sx set] \
+		-yscrollcommand [list $w.index.sy set] \
+		-state disabled
+	ttk::scrollbar $w.index.sx -orient h -command [list $ui_index xview]
+	ttk::scrollbar $w.index.sy -orient v -command [list $ui_index yview]
+	pack $w.index.title -side top -fill x
+	pack $w.index.sx -side bottom -fill x
+	pack $w.index.sy -side right -fill y
+	pack $ui_index -side left -fill both -expand 1
+
+	$w add $w.workdir
+	$w add $w.index
+}
+build_file_lists .vpane.files
 
 proc set_selection_colors {w has_focus} {
 	foreach tag [list in_diff in_sel] {
