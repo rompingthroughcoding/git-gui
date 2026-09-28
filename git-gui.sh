@@ -4033,6 +4033,20 @@ bind_button3 $ui_diff [list popup_diff_menu $ui_diff.ctxm $ui_diff.ctxmmg $ui_di
 }
 build_repo_ui .repotabs.repo0
 
+# Map each notebook tab to its repoctx id, and on tab change swap the active
+# repo context and cd to its worktree (git-gui runs git via the process cwd).
+array set tab_ctx {}
+set tab_ctx(.repotabs.repo0) [repoctx::current]
+proc on_repo_tab_changed {} {
+	global tab_ctx
+	set w [.repotabs select]
+	if {$w eq {} || ![info exists tab_ctx($w)]} return
+	if {[repoctx::current] eq $tab_ctx($w)} return
+	repoctx::use $tab_ctx($w)
+	catch {cd [repoctx::field worktree]}
+}
+bind .repotabs <<NotebookTabChanged>> on_repo_tab_changed
+
 # -- Status Bar
 #
 set main_status [::status_bar::new .status]
