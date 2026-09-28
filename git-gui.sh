@@ -3421,64 +3421,10 @@ ttk::frame .vpane.lower.diff -relief sunken -borderwidth 1 -height 500
 .vpane.lower pane .vpane.lower.diff -weight 1
 .vpane.lower pane .vpane.lower.commarea -weight 0
 
-# -- Commit Area Buttons
+# -- Commit Area Buttons and Message Buffer
 #
-ttk::frame .vpane.lower.commarea.buttons
-ttk::label .vpane.lower.commarea.buttons.l -text {} \
-	-anchor w \
-	-justify left
-pack .vpane.lower.commarea.buttons.l -side top -fill x
-pack .vpane.lower.commarea.buttons -side left -fill y
-
-ttk::button .vpane.lower.commarea.buttons.rescan -text [mc Rescan] \
-	-command ui_do_rescan
-pack .vpane.lower.commarea.buttons.rescan -side top -fill x
-lappend disable_on_lock \
-	{.vpane.lower.commarea.buttons.rescan conf -state}
-
-ttk::button .vpane.lower.commarea.buttons.incall -text [mc "Stage Changed"] \
-	-command do_add_all
-pack .vpane.lower.commarea.buttons.incall -side top -fill x
-lappend disable_on_lock \
-	{.vpane.lower.commarea.buttons.incall conf -state}
-
-if {![is_enabled nocommitmsg]} {
-	ttk::button .vpane.lower.commarea.buttons.signoff -text [mc "Sign Off"] \
-		-command do_signoff
-	pack .vpane.lower.commarea.buttons.signoff -side top -fill x
-}
-
-ttk::button .vpane.lower.commarea.buttons.commit -text [commit_btn_caption] \
-	-command do_commit
-pack .vpane.lower.commarea.buttons.commit -side top -fill x
-lappend disable_on_lock \
-	{.vpane.lower.commarea.buttons.commit conf -state}
-
-if {![is_enabled nocommit]} {
-	ttk::button .vpane.lower.commarea.buttons.push -text [mc Push] \
-		-command do_push_anywhere
-	pack .vpane.lower.commarea.buttons.push -side top -fill x
-}
-
-# -- Commit Message Buffer
-#
-ttk::frame .vpane.lower.commarea.buffer
-ttk::frame .vpane.lower.commarea.buffer.header
-set ui_comm .vpane.lower.commarea.buffer.frame.t
-set ui_coml .vpane.lower.commarea.buffer.header.l
-
-if {![is_enabled nocommit]} {
-	ttk::checkbutton .vpane.lower.commarea.buffer.header.amend \
-		-text [mc "Amend Last Commit"] \
-		-variable commit_type_is_amend \
-		-command do_select_commit_type
-	lappend disable_on_lock \
-		[list .vpane.lower.commarea.buffer.header.amend conf -state]
-}
-
-ttk::label $ui_coml \
-	-anchor w \
-	-justify left
+# Multi-repo fork spike: built under an arbitrary parent $w with ui_comm/ui_coml/
+# ui_comm_ctxm pointed at it; trace_commit_type updates the active tab's label.
 proc trace_commit_type {varname args} {
 	global ui_coml commit_type
 	switch -glob -- $commit_type {
@@ -3491,72 +3437,127 @@ proc trace_commit_type {varname args} {
 	}
 	$ui_coml conf -text $txt
 }
-trace add variable commit_type write trace_commit_type
-pack $ui_coml -side left -fill x
 
-if {![is_enabled nocommit]} {
-	pack .vpane.lower.commarea.buffer.header.amend -side right
-}
+proc build_commit_area {w} {
+	global ui_comm ui_coml ui_comm_ctxm disable_on_lock repo_config
 
-textframe .vpane.lower.commarea.buffer.frame
-ttext $ui_comm \
-	-borderwidth 1 \
-	-undo true \
-	-maxundo 20 \
-	-autoseparators true \
-	-takefocus 1 \
-	-highlightthickness 1 \
-	-relief sunken \
-	-width $repo_config(gui.commitmsgwidth) -height 9 -wrap none \
-	-font font_diff \
-	-xscrollcommand {.vpane.lower.commarea.buffer.frame.sbx set} \
-	-yscrollcommand {.vpane.lower.commarea.buffer.frame.sby set}
-ttk::scrollbar .vpane.lower.commarea.buffer.frame.sbx \
-	-orient horizontal \
-	-command [list $ui_comm xview]
-ttk::scrollbar .vpane.lower.commarea.buffer.frame.sby \
-	-orient vertical \
-	-command [list $ui_comm yview]
+	ttk::frame $w.buttons
+	ttk::label $w.buttons.l -text {} \
+		-anchor w \
+		-justify left
+	pack $w.buttons.l -side top -fill x
+	pack $w.buttons -side left -fill y
 
-pack .vpane.lower.commarea.buffer.frame.sbx -side bottom -fill x
-pack .vpane.lower.commarea.buffer.frame.sby -side right -fill y
-pack $ui_comm -side left -fill y
-pack .vpane.lower.commarea.buffer.header -side top -fill x
-pack .vpane.lower.commarea.buffer.frame -side left -fill y
-pack .vpane.lower.commarea.buffer -side left -fill y
+	ttk::button $w.buttons.rescan -text [mc Rescan] \
+		-command ui_do_rescan
+	pack $w.buttons.rescan -side top -fill x
+	lappend disable_on_lock [list $w.buttons.rescan conf -state]
 
-# -- Commit Message Buffer Context Menu
-#
-set ctxm .vpane.lower.commarea.buffer.ctxm
-menu $ctxm -tearoff 0
-$ctxm add command \
-	-label [mc Cut] \
-	-command {tk_textCut $ui_comm}
-$ctxm add command \
-	-label [mc Copy] \
-	-command {tk_textCopy $ui_comm}
-$ctxm add command \
-	-label [mc Paste] \
-	-command {tk_textPaste $ui_comm}
-$ctxm add command \
-	-label [mc Delete] \
-	-command {catch {$ui_comm delete sel.first sel.last}}
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Select All"] \
-	-command {focus $ui_comm;$ui_comm tag add sel 0.0 end}
-$ctxm add command \
-	-label [mc "Copy All"] \
-	-command {
-		$ui_comm tag add sel 0.0 end
-		tk_textCopy $ui_comm
-		$ui_comm tag remove sel 0.0 end
+	ttk::button $w.buttons.incall -text [mc "Stage Changed"] \
+		-command do_add_all
+	pack $w.buttons.incall -side top -fill x
+	lappend disable_on_lock [list $w.buttons.incall conf -state]
+
+	if {![is_enabled nocommitmsg]} {
+		ttk::button $w.buttons.signoff -text [mc "Sign Off"] \
+			-command do_signoff
+		pack $w.buttons.signoff -side top -fill x
 	}
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Sign Off"] \
-	-command do_signoff
-set ui_comm_ctxm $ctxm
+
+	ttk::button $w.buttons.commit -text [commit_btn_caption] \
+		-command do_commit
+	pack $w.buttons.commit -side top -fill x
+	lappend disable_on_lock [list $w.buttons.commit conf -state]
+
+	if {![is_enabled nocommit]} {
+		ttk::button $w.buttons.push -text [mc Push] \
+			-command do_push_anywhere
+		pack $w.buttons.push -side top -fill x
+	}
+
+	ttk::frame $w.buffer
+	ttk::frame $w.buffer.header
+	set ui_comm $w.buffer.frame.t
+	set ui_coml $w.buffer.header.l
+
+	if {![is_enabled nocommit]} {
+		ttk::checkbutton $w.buffer.header.amend \
+			-text [mc "Amend Last Commit"] \
+			-variable commit_type_is_amend \
+			-command do_select_commit_type
+		lappend disable_on_lock \
+			[list $w.buffer.header.amend conf -state]
+	}
+
+	ttk::label $ui_coml \
+		-anchor w \
+		-justify left
+	pack $ui_coml -side left -fill x
+
+	if {![is_enabled nocommit]} {
+		pack $w.buffer.header.amend -side right
+	}
+
+	textframe $w.buffer.frame
+	ttext $ui_comm \
+		-borderwidth 1 \
+		-undo true \
+		-maxundo 20 \
+		-autoseparators true \
+		-takefocus 1 \
+		-highlightthickness 1 \
+		-relief sunken \
+		-width $repo_config(gui.commitmsgwidth) -height 9 -wrap none \
+		-font font_diff \
+		-xscrollcommand [list $w.buffer.frame.sbx set] \
+		-yscrollcommand [list $w.buffer.frame.sby set]
+	ttk::scrollbar $w.buffer.frame.sbx \
+		-orient horizontal \
+		-command [list $ui_comm xview]
+	ttk::scrollbar $w.buffer.frame.sby \
+		-orient vertical \
+		-command [list $ui_comm yview]
+
+	pack $w.buffer.frame.sbx -side bottom -fill x
+	pack $w.buffer.frame.sby -side right -fill y
+	pack $ui_comm -side left -fill y
+	pack $w.buffer.header -side top -fill x
+	pack $w.buffer.frame -side left -fill y
+	pack $w.buffer -side left -fill y
+
+	set ctxm $w.buffer.ctxm
+	menu $ctxm -tearoff 0
+	$ctxm add command \
+		-label [mc Cut] \
+		-command {tk_textCut $ui_comm}
+	$ctxm add command \
+		-label [mc Copy] \
+		-command {tk_textCopy $ui_comm}
+	$ctxm add command \
+		-label [mc Paste] \
+		-command {tk_textPaste $ui_comm}
+	$ctxm add command \
+		-label [mc Delete] \
+		-command {catch {$ui_comm delete sel.first sel.last}}
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Select All"] \
+		-command {focus $ui_comm;$ui_comm tag add sel 0.0 end}
+	$ctxm add command \
+		-label [mc "Copy All"] \
+		-command {
+			$ui_comm tag add sel 0.0 end
+			tk_textCopy $ui_comm
+			$ui_comm tag remove sel 0.0 end
+		}
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Sign Off"] \
+		-command do_signoff
+	set ui_comm_ctxm $ctxm
+}
+build_commit_area .vpane.lower.commarea
+trace add variable commit_type write trace_commit_type
 
 # -- Diff Header
 #

@@ -28,7 +28,8 @@ namespace eval repoctx {
 	# (which references widgets via these globals) to the active repo's tree.
 	variable managed {_gitdir _gitworktree _reponame _prefix \
 		current_diff_path HEAD PARENT MERGE_HEAD commit_type \
-		ui_index ui_workdir ui_diff ui_comm ui_diff_ln ui_diff_hdr}
+		ui_index ui_workdir ui_diff ui_comm ui_diff_ln ui_diff_hdr \
+		ui_coml ui_comm_ctxm}
 	# Array globals swapped on switch (need array get/set rather than set).
 	variable managed_arrays {file_states}
 }
