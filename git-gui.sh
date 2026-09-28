@@ -3340,9 +3340,16 @@ ttk::notebook .repotabs
 pack .repotabs -side top -fill both -expand 1
 ttk::frame .repotabs.repo0
 .repotabs add .repotabs.repo0 -text $_reponame
-set ui_w .repotabs.repo0
-set ui_vpane $ui_w.vpane
-set ui_vpane_files $ui_vpane.files
+
+# Build one repository's entire UI under tab frame $w. Every panel sets its ui_*
+# path globals relative to $w, so switching repoctx to a repo repoints all the
+# shared logic at that tab's widgets. Wrapped as a proc so more repos can open in
+# new tabs; inner proc defs simply redefine the global helpers harmlessly.
+proc build_repo_ui {w} {
+	global ui_w ui_vpane ui_vpane_files ui_index ui_workdir ui_diff
+	set ui_w $w
+	set ui_vpane $w.vpane
+	set ui_vpane_files $ui_vpane.files
 
 build_branch_control $ui_w.branch
 
@@ -4023,6 +4030,8 @@ proc popup_diff_menu {ctxm ctxmmg ctxmsm x y X Y} {
 	}
 }
 bind_button3 $ui_diff [list popup_diff_menu $ui_diff.ctxm $ui_diff.ctxmmg $ui_diff.ctxmsm %x %y %X %Y]
+}
+build_repo_ui .repotabs.repo0
 
 # -- Status Bar
 #
