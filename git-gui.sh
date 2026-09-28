@@ -3830,98 +3830,105 @@ proc create_common_diff_popup {ctxm} {
 		-command do_options
 }
 
-set ctxm $ui_diff.ctxm
-menu $ctxm -tearoff 0
-$ctxm add command \
-	-label [mc "Apply/Reverse Hunk"] \
-	-command {apply_or_revert_hunk $cursorX $cursorY 0}
-set ui_diff_applyhunk [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_applyhunk -state]
-$ctxm add command \
-	-label [mc "Apply/Reverse Line"] \
-	-command {apply_or_revert_range_or_line $cursorX $cursorY 0; do_rescan}
-set ui_diff_applyline [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_applyline -state]
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Revert Hunk"] \
-	-command {apply_or_revert_hunk $cursorX $cursorY 1}
-set ui_diff_reverthunk [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_reverthunk -state]
-$ctxm add command \
-	-label [mc "Revert Line"] \
-	-command {apply_or_revert_range_or_line $cursorX $cursorY 1; do_rescan}
-set ui_diff_revertline [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_revertline -state]
-$ctxm add command \
-	-label [mc "Undo Last Revert"] \
-	-command {undo_last_revert; do_rescan}
-set ui_diff_undorevert [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_undorevert -state]
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Show Less Context"] \
-	-command show_less_context
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-$ctxm add command \
-	-label [mc "Show More Context"] \
-	-command show_more_context
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-$ctxm add separator
-create_common_diff_popup $ctxm
+proc build_diff_menus {} {
+	global ui_diff diff_actions
+	global ui_diff_applyhunk ui_diff_applyline
+	global ui_diff_reverthunk ui_diff_revertline ui_diff_undorevert
 
-set ctxmmg $ui_diff.ctxmmg
-menu $ctxmmg -tearoff 0
-$ctxmmg add command \
-	-label [mc "Run Merge Tool"] \
-	-command {merge_resolve_tool}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add separator
-$ctxmmg add command \
-	-label [mc "Use Remote Version"] \
-	-command {merge_resolve_one 3}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add command \
-	-label [mc "Use Local Version"] \
-	-command {merge_resolve_one 2}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add command \
-	-label [mc "Revert To Base"] \
-	-command {merge_resolve_one 1}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add separator
-$ctxmmg add command \
-	-label [mc "Show Less Context"] \
-	-command show_less_context
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add command \
-	-label [mc "Show More Context"] \
-	-command show_more_context
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add separator
-create_common_diff_popup $ctxmmg
+	set ctxm $ui_diff.ctxm
+	menu $ctxm -tearoff 0
+	$ctxm add command \
+		-label [mc "Apply/Reverse Hunk"] \
+		-command {apply_or_revert_hunk $cursorX $cursorY 0}
+	set ui_diff_applyhunk [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_applyhunk -state]
+	$ctxm add command \
+		-label [mc "Apply/Reverse Line"] \
+		-command {apply_or_revert_range_or_line $cursorX $cursorY 0; do_rescan}
+	set ui_diff_applyline [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_applyline -state]
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Revert Hunk"] \
+		-command {apply_or_revert_hunk $cursorX $cursorY 1}
+	set ui_diff_reverthunk [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_reverthunk -state]
+	$ctxm add command \
+		-label [mc "Revert Line"] \
+		-command {apply_or_revert_range_or_line $cursorX $cursorY 1; do_rescan}
+	set ui_diff_revertline [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_revertline -state]
+	$ctxm add command \
+		-label [mc "Undo Last Revert"] \
+		-command {undo_last_revert; do_rescan}
+	set ui_diff_undorevert [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_undorevert -state]
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Show Less Context"] \
+		-command show_less_context
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add command \
+		-label [mc "Show More Context"] \
+		-command show_more_context
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add separator
+	create_common_diff_popup $ctxm
 
-set ctxmsm $ui_diff.ctxmsm
-menu $ctxmsm -tearoff 0
-$ctxmsm add command \
-	-label [mc "Visualize These Changes In The Submodule"] \
-	-command {do_gitk -- true}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add command \
-	-label [mc "Visualize Current Branch History In The Submodule"] \
-	-command {do_gitk {} true}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add command \
-	-label [mc "Visualize All Branch History In The Submodule"] \
-	-command {do_gitk --all true}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add separator
-$ctxmsm add command \
-	-label [mc "Start git gui In The Submodule"] \
-	-command {do_git_gui}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add separator
-create_common_diff_popup $ctxmsm
+	set ctxmmg $ui_diff.ctxmmg
+	menu $ctxmmg -tearoff 0
+	$ctxmmg add command \
+		-label [mc "Run Merge Tool"] \
+		-command {merge_resolve_tool}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add separator
+	$ctxmmg add command \
+		-label [mc "Use Remote Version"] \
+		-command {merge_resolve_one 3}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add command \
+		-label [mc "Use Local Version"] \
+		-command {merge_resolve_one 2}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add command \
+		-label [mc "Revert To Base"] \
+		-command {merge_resolve_one 1}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add separator
+	$ctxmmg add command \
+		-label [mc "Show Less Context"] \
+		-command show_less_context
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add command \
+		-label [mc "Show More Context"] \
+		-command show_more_context
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add separator
+	create_common_diff_popup $ctxmmg
+
+	set ctxmsm $ui_diff.ctxmsm
+	menu $ctxmsm -tearoff 0
+	$ctxmsm add command \
+		-label [mc "Visualize These Changes In The Submodule"] \
+		-command {do_gitk -- true}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add command \
+		-label [mc "Visualize Current Branch History In The Submodule"] \
+		-command {do_gitk {} true}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add command \
+		-label [mc "Visualize All Branch History In The Submodule"] \
+		-command {do_gitk --all true}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add separator
+	$ctxmsm add command \
+		-label [mc "Start git gui In The Submodule"] \
+		-command {do_git_gui}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add separator
+	create_common_diff_popup $ctxmsm
+}
+build_diff_menus
 
 proc has_textconv {path} {
 	if {[is_config_false gui.textconv]} {
@@ -4015,7 +4022,7 @@ proc popup_diff_menu {ctxm ctxmmg ctxmsm x y X Y} {
 		tk_popup $ctxm $X $Y
 	}
 }
-bind_button3 $ui_diff [list popup_diff_menu $ctxm $ctxmmg $ctxmsm %x %y %X %Y]
+bind_button3 $ui_diff [list popup_diff_menu $ui_diff.ctxm $ui_diff.ctxmmg $ui_diff.ctxmsm %x %y %X %Y]
 
 # -- Status Bar
 #
