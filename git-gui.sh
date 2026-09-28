@@ -1229,7 +1229,7 @@ if {[info exists env(GITGUI_CTX_SELFTEST)]} {
 	set ::HEAD "realbranch"
 	set ::ui_diff "real/ui_diff"
 	array set ::file_states {real.txt {_M {}}}
-	set _ct_fake [repoctx::register /fake/repo/.git /fake/repo demo-repo {}]
+	set _ct_fake [repoctx::open_context /fake/repo/.git /fake/repo demo-repo {}]
 	# A fresh context: fake repo's identity, live state (diff/HEAD/file_states/
 	# widget paths) all start clean rather than inheriting the real repo's.
 	set _ct_ok [expr {[gitdir] eq {/fake/repo/.git} && [reponame] eq {demo-repo} \
@@ -2825,6 +2825,11 @@ if {[is_enabled multicommit] || [is_enabled singlecommit]} {
 #
 menu .mbar.repository
 
+.mbar.repository add command \
+	-label [mc "Open Repository In New Tab..."] \
+	-command do_open_repo_tab
+.mbar.repository add separator
+
 if {![is_bare]} {
 	.mbar.repository add command \
 		-label [mc "Explore Working Copy"] \
@@ -3579,7 +3584,10 @@ proc build_commit_area {w} {
 	set ui_comm_ctxm $ctxm
 }
 build_commit_area $ui_vpane.lower.commarea
-trace add variable commit_type write trace_commit_type
+if {![info exists ::_gg_trace_ct]} {
+	set ::_gg_trace_ct 1
+	trace add variable commit_type write trace_commit_type
+}
 
 # -- Diff Header
 #
@@ -3607,7 +3615,10 @@ proc trace_current_diff_path {varname args} {
 		uplevel #0 $w $o
 	}
 }
-trace add variable current_diff_path write trace_current_diff_path
+if {![info exists ::_gg_trace_cdp]} {
+	set ::_gg_trace_cdp 1
+	trace add variable current_diff_path write trace_current_diff_path
+}
 
 proc copy_diff_path_unix {} {
 	global _gitworktree current_diff_path
@@ -4046,6 +4057,41 @@ proc on_repo_tab_changed {} {
 	catch {cd [repoctx::field worktree]}
 }
 bind .repotabs <<NotebookTabChanged>> on_repo_tab_changed
+
+# Open another repository in a new tab: discover its git dirs, register a fresh
+# repoctx, build its UI under a new tab, load its config, and rescan.
+proc open_repo_context {path} {
+	global tab_ctx
+	set save [pwd]
+	if {[catch {cd $path}]} { return }
+	if {[catch {set gd [git rev-parse --git-dir]}]} { cd $save ; return }
+	set gd [file normalize $gd]
+	set wt {}
+	catch {set wt [string trim [git rev-parse --show-toplevel]]}
+	if {$wt eq {}} { set wt [file normalize $path] }
+	set pfx {}
+	catch {set pfx [string trim [git rev-parse --show-prefix]]}
+	set rn [file tail $wt]
+
+	set w .repotabs.repo[llength [repoctx::ids]]
+	ttk::frame $w
+	.repotabs add $w -text $rn
+
+	repoctx::open_context $gd $wt $rn $pfx
+	cd $wt
+	load_config 0
+	apply_config
+	build_repo_ui $w
+	set tab_ctx($w) [repoctx::current]
+
+	.repotabs select $w
+	do_rescan
+}
+
+proc do_open_repo_tab {} {
+	set p [tk_chooseDirectory -title [mc "Open Repository In New Tab"] -mustexist 1]
+	if {$p ne {}} { open_repo_context $p }
+}
 
 # -- Status Bar
 #

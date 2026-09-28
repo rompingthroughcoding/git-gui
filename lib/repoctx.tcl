@@ -29,22 +29,47 @@ namespace eval repoctx {
 	variable managed {_gitdir _gitworktree _reponame _prefix \
 		current_diff_path HEAD PARENT MERGE_HEAD commit_type current_branch \
 		ui_index ui_workdir ui_diff ui_comm ui_diff_ln ui_diff_hdr \
-		ui_coml ui_comm_ctxm ui_vpane ui_vpane_files ui_commarea}
+		ui_coml ui_comm_ctxm ui_vpane ui_vpane_files ui_commarea diff_actions}
 	# Array globals swapped on switch (need array get/set rather than set).
-	variable managed_arrays {file_states}
+	variable managed_arrays {file_states repo_config}
 }
 
 # Register a repository's identity as a new context and make it current.
 # Returns the new context id.
+# Register the startup repository as the first context. Adopts the currently
+# live globals (already correct for the startup repo) rather than wiping them —
+# repo_config in particular is loaded before this runs. Non-identity managed
+# values are captured on the first switch away.
 proc repoctx::register {gitdir worktree reponame prefix} {
 	variable contexts
 	variable order
+	variable current
+	variable seq
+	set id ctx[incr seq]
+	set contexts($id) [dict create \
+		_gitdir $gitdir _gitworktree $worktree _reponame $reponame _prefix $prefix]
+	lappend order $id
+	set current $id
+	global _gitdir _gitworktree _reponame _prefix
+	set _gitdir      $gitdir
+	set _gitworktree $worktree
+	set _reponame    $reponame
+	set _prefix      $prefix
+	return $id
+}
+
+# Open an additional repository as a fresh context: save the outgoing repo's
+# live state, then switch to an empty context (identity only) so the caller can
+# repopulate the globals via load_config / build_repo_ui / do_rescan.
+proc repoctx::open_context {gitdir worktree reponame prefix} {
+	variable contexts
+	variable order
+	variable current
 	variable seq
 	variable managed
 	variable managed_arrays
+	if {$current ne {}} { _save $current }
 	set id ctx[incr seq]
-	# Seed every managed global empty so a fresh context starts clean, then
-	# overlay this repo's identity.
 	set d [dict create]
 	foreach v $managed        { dict set d $v {} }
 	foreach v $managed_arrays { dict set d $v {} }
@@ -54,7 +79,8 @@ proc repoctx::register {gitdir worktree reponame prefix} {
 	dict set d _prefix      $prefix
 	set contexts($id) $d
 	lappend order $id
-	use $id
+	set current $id
+	_load $id
 	return $id
 }
 
