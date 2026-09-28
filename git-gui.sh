@@ -436,11 +436,11 @@ proc appname {} {
 }
 
 proc gitdir {args} {
-	global _gitdir
+	set dir [repoctx::field gitdir]
 	if {$args eq {}} {
-		return $_gitdir
+		return $dir
 	}
-	return [eval [list file join $_gitdir] $args]
+	return [eval [list file join $dir] $args]
 }
 
 proc githtmldir {args} {
@@ -459,7 +459,7 @@ proc githtmldir {args} {
 }
 
 proc reponame {} {
-	return $::_reponame
+	return [repoctx::field reponame]
 }
 
 proc is_enabled {option} {
@@ -991,6 +991,9 @@ if {$idx ne {}} {
 }
 unset -nocomplain idx fd
 
+# Multi-repo fork spike: per-repo context scaffolding (see lib/repoctx.tcl).
+source [file join $oguilib repoctx.tcl]
+
 ######################################################################
 ##
 ## config file parsing
@@ -1213,6 +1216,23 @@ if {[lindex $_reponame end] eq {.git}} {
 	set _reponame [lindex $_reponame end-1]
 } else {
 	set _reponame [lindex $_reponame end]
+}
+
+# Multi-repo fork spike: promote this repository's identity into a switchable
+# per-repo context. The gitdir/reponame accessors now read from it.
+repoctx::register $_gitdir $_gitworktree $_reponame \
+	[expr {[info exists _prefix] ? $_prefix : {}}]
+
+if {[info exists env(GITGUI_CTX_SELFTEST)]} {
+	set _ct_real [repoctx::current]
+	set _ct_fake [repoctx::register /fake/repo/.git /fake/repo demo-repo {}]
+	set _ct_ok [expr {[gitdir] eq {/fake/repo/.git} && [reponame] eq {demo-repo}}]
+	repoctx::use $_ct_real
+	set _ct_ok [expr {$_ct_ok && [reponame] eq $_reponame && [gitdir] eq $_gitdir}]
+	repoctx::forget $_ct_fake
+	puts stderr "repoctx self-test: [expr {$_ct_ok ? {PASS} : {FAIL}}]\
+		(2 contexts, ids=[llength [repoctx::ids]], active=[reponame])"
+	unset -nocomplain _ct_real _ct_fake _ct_ok
 }
 
 set env(GIT_DIR) $_gitdir
