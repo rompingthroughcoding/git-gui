@@ -3830,7 +3830,7 @@ proc create_common_diff_popup {ctxm} {
 		-command do_options
 }
 
-set ctxm .vpane.lower.diff.body.ctxm
+set ctxm $ui_diff.ctxm
 menu $ctxm -tearoff 0
 $ctxm add command \
 	-label [mc "Apply/Reverse Hunk"] \
@@ -3870,7 +3870,7 @@ lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
 $ctxm add separator
 create_common_diff_popup $ctxm
 
-set ctxmmg .vpane.lower.diff.body.ctxmmg
+set ctxmmg $ui_diff.ctxmmg
 menu $ctxmmg -tearoff 0
 $ctxmmg add command \
 	-label [mc "Run Merge Tool"] \
@@ -3901,7 +3901,7 @@ lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
 $ctxmmg add separator
 create_common_diff_popup $ctxmmg
 
-set ctxmsm .vpane.lower.diff.body.ctxmsm
+set ctxmsm $ui_diff.ctxmsm
 menu $ctxmsm -tearoff 0
 $ctxmsm add command \
 	-label [mc "Visualize These Changes In The Submodule"] \
