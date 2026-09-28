@@ -3333,11 +3333,14 @@ proc build_branch_control {w} {
 }
 # -- Main Window Layout
 #
-# Multi-repo fork: the whole layout hangs off $ui_w (empty string = the toplevel
-# ".", so paths are unchanged for the single-repo case). Point ui_w at a
-# notebook tab frame to build a repo's UI inside a tab. ui_vpane/ui_vpane_files
-# are exposed as globals for the sash geometry save/restore and console sizing.
-set ui_w {}
+# Multi-repo fork: repositories live in notebook tabs. Each tab is a frame under
+# which the whole layout is built (via $ui_w). ui_vpane/ui_vpane_files are
+# exposed as globals for the sash geometry save/restore and console sizing.
+ttk::notebook .repotabs
+pack .repotabs -side top -fill both -expand 1
+ttk::frame .repotabs.repo0
+.repotabs add .repotabs.repo0 -text $_reponame
+set ui_w .repotabs.repo0
 set ui_vpane $ui_w.vpane
 set ui_vpane_files $ui_vpane.files
 
