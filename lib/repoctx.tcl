@@ -22,8 +22,11 @@ namespace eval repoctx {
 	variable order   {}     ;# registration order of ids
 	variable current {}     ;# active context id
 	variable seq     0
-	# Globals that hold the active repo's state; saved/restored on switch.
-	variable managed {_gitdir _gitworktree _reponame _prefix current_diff_path}
+	# Scalar globals that hold the active repo's state; swapped on switch.
+	variable managed {_gitdir _gitworktree _reponame _prefix \
+		current_diff_path HEAD PARENT MERGE_HEAD commit_type}
+	# Array globals swapped on switch (need array get/set rather than set).
+	variable managed_arrays {file_states}
 }
 
 # Register a repository's identity as a new context and make it current.
@@ -32,10 +35,19 @@ proc repoctx::register {gitdir worktree reponame prefix} {
 	variable contexts
 	variable order
 	variable seq
+	variable managed
+	variable managed_arrays
 	set id ctx[incr seq]
-	set contexts($id) [dict create \
-		_gitdir $gitdir _gitworktree $worktree _reponame $reponame \
-		_prefix $prefix current_diff_path {}]
+	# Seed every managed global empty so a fresh context starts clean, then
+	# overlay this repo's identity.
+	set d [dict create]
+	foreach v $managed        { dict set d $v {} }
+	foreach v $managed_arrays { dict set d $v {} }
+	dict set d _gitdir      $gitdir
+	dict set d _gitworktree $worktree
+	dict set d _reponame    $reponame
+	dict set d _prefix      $prefix
+	set contexts($id) $d
 	lappend order $id
 	use $id
 	return $id
@@ -45,9 +57,13 @@ proc repoctx::register {gitdir worktree reponame prefix} {
 proc repoctx::_save {id} {
 	variable contexts
 	variable managed
+	variable managed_arrays
 	if {![info exists contexts($id)]} return
 	foreach v $managed {
 		if {[info exists ::$v]} { dict set contexts($id) $v [set ::$v] }
+	}
+	foreach v $managed_arrays {
+		if {[array exists ::$v]} { dict set contexts($id) $v [array get ::$v] }
 	}
 }
 
@@ -55,8 +71,15 @@ proc repoctx::_save {id} {
 proc repoctx::_load {id} {
 	variable contexts
 	variable managed
+	variable managed_arrays
 	foreach v $managed {
 		if {[dict exists $contexts($id) $v]} { set ::$v [dict get $contexts($id) $v] }
+	}
+	foreach v $managed_arrays {
+		if {[dict exists $contexts($id) $v]} {
+			array unset ::$v
+			array set ::$v [dict get $contexts($id) $v]
+		}
 	}
 }
 

@@ -1226,20 +1226,31 @@ repoctx::register $_gitdir $_gitworktree $_reponame \
 if {[info exists env(GITGUI_CTX_SELFTEST)]} {
 	set _ct_real [repoctx::current]
 	set ::current_diff_path "real/path.txt"
+	set ::HEAD "realbranch"
+	array set ::file_states {real.txt {_M {}}}
 	set _ct_fake [repoctx::register /fake/repo/.git /fake/repo demo-repo {}]
-	# A fresh context starts with its own empty diff path and identity.
+	# A fresh context: fake repo's identity, live state (diff/HEAD/file_states)
+	# all start clean rather than inheriting the real repo's.
 	set _ct_ok [expr {[gitdir] eq {/fake/repo/.git} && [reponame] eq {demo-repo} \
-		&& $::current_diff_path eq {}}]
+		&& $::current_diff_path eq {} && $::HEAD eq {} \
+		&& [array size ::file_states] == 0}]
 	set ::current_diff_path "fake/other.txt"
+	set ::HEAD "fakebranch"
+	array set ::file_states {fake.txt {_M {}}}
 	repoctx::use $_ct_real
-	# Switching back restores identity AND this repo's own current_diff_path.
-	set _ct_ok [expr {$_ct_ok && [reponame] eq $_reponame \
-		&& [gitdir] eq $_gitdir && $::current_diff_path eq {real/path.txt}}]
+	# Switching back restores every managed global for the real repo, and the
+	# fake repo's file_states entry is gone.
+	set _ct_ok [expr {$_ct_ok && [reponame] eq $_reponame && [gitdir] eq $_gitdir \
+		&& $::current_diff_path eq {real/path.txt} && $::HEAD eq {realbranch} \
+		&& [lindex $::file_states(real.txt) 0] eq {_M} \
+		&& ![info exists ::file_states(fake.txt)]}]
 	repoctx::forget $_ct_fake
+	array unset ::file_states
 	set ::current_diff_path {}
+	set ::HEAD {}
 	puts stderr "repoctx self-test: [expr {$_ct_ok ? {PASS} : {FAIL}}]\
-		(per-repo identity + current_diff_path isolated across switch;\
-		active=[reponame])"
+		(identity + current_diff_path + HEAD + file_states array isolated\
+		across switch)"
 	unset -nocomplain _ct_real _ct_fake _ct_ok
 }
 
