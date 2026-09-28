@@ -112,6 +112,10 @@ proc repoctx::_load {id} {
 			array set ::$v [dict get $contexts($id) $v]
 		}
 	}
+	# git-gui targets a repo via the GIT_DIR/GIT_WORK_TREE env vars, not just
+	# cwd; keep them in step with the active repo.
+	catch {set ::env(GIT_DIR) $::_gitdir}
+	catch {set ::env(GIT_WORK_TREE) $::_gitworktree}
 }
 
 # Switch the active context: snapshot the outgoing repo, restore the incoming.

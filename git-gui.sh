@@ -4061,8 +4061,14 @@ bind .repotabs <<NotebookTabChanged>> on_repo_tab_changed
 # Open another repository in a new tab: discover its git dirs, register a fresh
 # repoctx, build its UI under a new tab, load its config, and rescan.
 proc open_repo_context {path} {
-	global tab_ctx
+	global tab_ctx env
 	set save [pwd]
+	# git-gui pins the active repo via GIT_DIR/GIT_WORK_TREE env vars, which
+	# override cwd. Clear them so discovery honors the chosen directory; the
+	# fresh context's _load will set them to the new repo.
+	set restore_env [list]
+	if {[info exists env(GIT_DIR)]}       { set restore_env $env(GIT_DIR) ; unset env(GIT_DIR) }
+	if {[info exists env(GIT_WORK_TREE)]} { unset env(GIT_WORK_TREE) }
 	if {[catch {cd $path}]} { return }
 	if {[catch {set gd [git rev-parse --git-dir]}]} { cd $save ; return }
 	set gd [file normalize $gd]
@@ -4080,7 +4086,12 @@ proc open_repo_context {path} {
 	repoctx::open_context $gd $wt $rn $pfx
 	cd $wt
 	load_config 0
-	apply_config
+	# apply_config does one-time global theming (fonts/theme/pave_toplevel)
+	# already done at startup; for an extra repo we only need its comment char.
+	set ::comment_string [get_config core.commentstring]
+	if {$::comment_string eq {}} {
+		set ::comment_string [get_config core.commentchar]
+	}
 	build_repo_ui $w
 	set tab_ctx($w) [repoctx::current]
 
@@ -4273,6 +4284,7 @@ if {[winfo exists $ui_comm]} {
 	proc backup_commit_buffer {} {
 		global ui_comm GITGUI_BCK_exists
 
+		if {$ui_comm eq {} || ![winfo exists $ui_comm]} return
 		set m [$ui_comm edit modified]
 		if {$m || $GITGUI_BCK_exists} {
 			set msg [string trim [$ui_comm get 0.0 end]]
