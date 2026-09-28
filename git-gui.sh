@@ -3652,103 +3652,113 @@ bind .vpane.lower.diff.header.path <Double-Button-2> {copy_diff_path_unix}
 
 # -- Diff Body
 #
-textframe .vpane.lower.diff.body
-set ui_diff_ln .vpane.lower.diff.body.ln
-set ui_diff .vpane.lower.diff.body.t
-
+# Multi-repo fork spike: the line-number + diff text widgets are built by a proc
+# under an arbitrary parent $w, pointing ui_diff/ui_diff_ln at it. The scroll
+# helpers derive their sibling widgets from those globals so they work for any
+# tab's diff body.
 proc diff_yscrollcmd {args} {
-	eval .vpane.lower.diff.body.sby set $args
-	.vpane.lower.diff.body.ln yview moveto [lindex $args 0]
+	global ui_diff ui_diff_ln
+	set body [winfo parent $ui_diff]
+	eval $body.sby set $args
+	$ui_diff_ln yview moveto [lindex $args 0]
 }
 proc diff_yview {args} {
-	eval .vpane.lower.diff.body.t yview $args
-	.vpane.lower.diff.body.ln yview moveto \
-		[lindex [.vpane.lower.diff.body.t yview] 0]
+	global ui_diff ui_diff_ln
+	eval $ui_diff yview $args
+	$ui_diff_ln yview moveto [lindex [$ui_diff yview] 0]
 }
 
-text $ui_diff_ln \
-	-borderwidth 0 \
-	-width 11 -height 5 -wrap none \
-	-font font_diff \
-	-state disabled \
-	-takefocus 0 \
-	-highlightthickness 0 \
-	-background #f0f0f0 \
-	-foreground #888888 \
-	-padx 4 \
-	-cursor {}
-bind $ui_diff_ln <MouseWheel> \
-	{diff_yview scroll [expr {-%D/120}] units; break}
-bind $ui_diff_ln <Button-4> {diff_yview scroll -1 units; break}
-bind $ui_diff_ln <Button-5> {diff_yview scroll  1 units; break}
+proc build_diff_body {w} {
+	global ui_diff ui_diff_ln
+	set ui_diff_ln $w.body.ln
+	set ui_diff    $w.body.t
 
-ttext $ui_diff \
-	-borderwidth 0 \
-	-width 80 -height 5 -wrap none \
-	-font font_diff \
-	-takefocus 1 -highlightthickness 1 \
-	-xscrollcommand {.vpane.lower.diff.body.sbx set} \
-	-yscrollcommand diff_yscrollcmd \
-	-state disabled
-catch {$ui_diff configure -tabstyle wordprocessor}
-ttk::scrollbar .vpane.lower.diff.body.sbx -orient horizontal \
-	-command [list $ui_diff xview]
-ttk::scrollbar .vpane.lower.diff.body.sby -orient vertical \
-	-command diff_yview
-pack .vpane.lower.diff.body.sbx -side bottom -fill x
-pack .vpane.lower.diff.body.sby -side right -fill y
-pack $ui_diff_ln -side left -fill y
-pack $ui_diff -side left -fill both -expand 1
+	textframe $w.body
+	text $ui_diff_ln \
+		-borderwidth 0 \
+		-width 11 -height 5 -wrap none \
+		-font font_diff \
+		-state disabled \
+		-takefocus 0 \
+		-highlightthickness 0 \
+		-background #f0f0f0 \
+		-foreground #888888 \
+		-padx 4 \
+		-cursor {}
+	bind $ui_diff_ln <MouseWheel> \
+		{diff_yview scroll [expr {-%D/120}] units; break}
+	bind $ui_diff_ln <Button-4> {diff_yview scroll -1 units; break}
+	bind $ui_diff_ln <Button-5> {diff_yview scroll  1 units; break}
+
+	ttext $ui_diff \
+		-borderwidth 0 \
+		-width 80 -height 5 -wrap none \
+		-font font_diff \
+		-takefocus 1 -highlightthickness 1 \
+		-xscrollcommand [list $w.body.sbx set] \
+		-yscrollcommand diff_yscrollcmd \
+		-state disabled
+	catch {$ui_diff configure -tabstyle wordprocessor}
+	ttk::scrollbar $w.body.sbx -orient horizontal \
+		-command [list $ui_diff xview]
+	ttk::scrollbar $w.body.sby -orient vertical \
+		-command diff_yview
+	pack $w.body.sbx -side bottom -fill x
+	pack $w.body.sby -side right -fill y
+	pack $ui_diff_ln -side left -fill y
+	pack $ui_diff -side left -fill both -expand 1
+	pack $w.body -side bottom -fill both -expand 1
+
+	foreach {n c} {0 black 1 red4 2 green4 3 yellow4 4 blue4 5 magenta4 6 cyan4 7 grey60} {
+		$ui_diff tag configure clr4$n -background $c
+		$ui_diff tag configure clri4$n -foreground $c
+		$ui_diff tag configure clr3$n -foreground $c
+		$ui_diff tag configure clri3$n -background $c
+	}
+	$ui_diff tag configure clr1 -font font_diffbold
+	$ui_diff tag configure clr4 -underline 1
+
+	$ui_diff tag conf d_info -foreground blue -font font_diffbold
+	$ui_diff tag conf d_rescan -foreground blue -underline 1 -font font_diffbold
+	$ui_diff tag bind d_rescan <Button-1> { clear_diff; rescan ui_ready 0 }
+
+	$ui_diff tag conf d_cr -elide true
+	$ui_diff tag conf d_@ -font font_diffbold
+	$ui_diff tag conf d_+ -foreground {#00a000}
+	$ui_diff tag conf d_- -foreground red
+
+	$ui_diff tag conf d_++ -foreground {#00a000}
+	$ui_diff tag conf d_-- -foreground red
+	$ui_diff tag conf d_+s \
+		-foreground {#00a000} \
+		-background {#e2effa}
+	$ui_diff tag conf d_-s \
+		-foreground red \
+		-background {#e2effa}
+	$ui_diff tag conf d_s+ \
+		-foreground {#00a000} \
+		-background ivory1
+	$ui_diff tag conf d_s- \
+		-foreground red \
+		-background ivory1
+
+	$ui_diff tag conf d< \
+		-foreground orange \
+		-font font_diffbold
+	$ui_diff tag conf d| \
+		-foreground orange \
+		-font font_diffbold
+	$ui_diff tag conf d= \
+		-foreground orange \
+		-font font_diffbold
+	$ui_diff tag conf d> \
+		-foreground orange \
+		-font font_diffbold
+
+	$ui_diff tag raise sel
+}
 pack .vpane.lower.diff.header -side top -fill x
-pack .vpane.lower.diff.body -side bottom -fill both -expand 1
-
-foreach {n c} {0 black 1 red4 2 green4 3 yellow4 4 blue4 5 magenta4 6 cyan4 7 grey60} {
-	$ui_diff tag configure clr4$n -background $c
-	$ui_diff tag configure clri4$n -foreground $c
-	$ui_diff tag configure clr3$n -foreground $c
-	$ui_diff tag configure clri3$n -background $c
-}
-$ui_diff tag configure clr1 -font font_diffbold
-$ui_diff tag configure clr4 -underline 1
-
-$ui_diff tag conf d_info -foreground blue -font font_diffbold
-$ui_diff tag conf d_rescan -foreground blue -underline 1 -font font_diffbold
-$ui_diff tag bind d_rescan <Button-1> { clear_diff; rescan ui_ready 0 }
-
-$ui_diff tag conf d_cr -elide true
-$ui_diff tag conf d_@ -font font_diffbold
-$ui_diff tag conf d_+ -foreground {#00a000}
-$ui_diff tag conf d_- -foreground red
-
-$ui_diff tag conf d_++ -foreground {#00a000}
-$ui_diff tag conf d_-- -foreground red
-$ui_diff tag conf d_+s \
-	-foreground {#00a000} \
-	-background {#e2effa}
-$ui_diff tag conf d_-s \
-	-foreground red \
-	-background {#e2effa}
-$ui_diff tag conf d_s+ \
-	-foreground {#00a000} \
-	-background ivory1
-$ui_diff tag conf d_s- \
-	-foreground red \
-	-background ivory1
-
-$ui_diff tag conf d< \
-	-foreground orange \
-	-font font_diffbold
-$ui_diff tag conf d| \
-	-foreground orange \
-	-font font_diffbold
-$ui_diff tag conf d= \
-	-foreground orange \
-	-font font_diffbold
-$ui_diff tag conf d> \
-	-foreground orange \
-	-font font_diffbold
-
-$ui_diff tag raise sel
+build_diff_body .vpane.lower.diff
 
 # -- Diff Body Context Menu
 #
