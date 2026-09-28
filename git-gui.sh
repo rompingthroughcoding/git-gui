@@ -2434,8 +2434,8 @@ proc do_quit {{rc {1}}} {
 		}
 		set cfg_geometry [list]
 		lappend cfg_geometry [wm geometry .]
-		lappend cfg_geometry [.vpane sashpos 0]
-		lappend cfg_geometry [.vpane.files sashpos 0]
+		lappend cfg_geometry [$::ui_vpane sashpos 0]
+		lappend cfg_geometry [$::ui_vpane_files sashpos 0]
 		if {[catch {set rc_geometry $repo_config(gui.geometry)}]} {
 			set rc_geometry {}
 		}
@@ -3331,14 +3331,22 @@ proc build_branch_control {w} {
 	pack $w.cb -side left -fill x
 	pack $w -side top -fill x
 }
-build_branch_control .branch
-
 # -- Main Window Layout
 #
-ttk::panedwindow .vpane -orient horizontal
-ttk::panedwindow .vpane.files -orient vertical
-.vpane add .vpane.files
-pack .vpane -anchor n -side top -fill both -expand 1
+# Multi-repo fork: the whole layout hangs off $ui_w (empty string = the toplevel
+# ".", so paths are unchanged for the single-repo case). Point ui_w at a
+# notebook tab frame to build a repo's UI inside a tab. ui_vpane/ui_vpane_files
+# are exposed as globals for the sash geometry save/restore and console sizing.
+set ui_w {}
+set ui_vpane $ui_w.vpane
+set ui_vpane_files $ui_vpane.files
+
+build_branch_control $ui_w.branch
+
+ttk::panedwindow $ui_vpane -orient horizontal
+ttk::panedwindow $ui_vpane_files -orient vertical
+$ui_vpane add $ui_vpane_files
+pack $ui_vpane -anchor n -side top -fill both -expand 1
 
 # -- Working Directory and Index File Lists
 #
@@ -3394,7 +3402,7 @@ proc build_file_lists {w} {
 	$w add $w.workdir
 	$w add $w.index
 }
-build_file_lists .vpane.files
+build_file_lists $ui_vpane_files
 
 proc set_selection_colors {w has_focus} {
 	foreach tag [list in_diff in_sel] {
@@ -3415,14 +3423,14 @@ unset i
 
 # -- Diff and Commit Area
 #
-ttk::panedwindow .vpane.lower -orient vertical
-ttk::frame .vpane.lower.commarea
-ttk::frame .vpane.lower.diff -relief sunken -borderwidth 1 -height 500
-.vpane.lower add .vpane.lower.diff
-.vpane.lower add .vpane.lower.commarea
-.vpane add .vpane.lower
-.vpane.lower pane .vpane.lower.diff -weight 1
-.vpane.lower pane .vpane.lower.commarea -weight 0
+ttk::panedwindow $ui_vpane.lower -orient vertical
+ttk::frame $ui_vpane.lower.commarea
+ttk::frame $ui_vpane.lower.diff -relief sunken -borderwidth 1 -height 500
+$ui_vpane.lower add $ui_vpane.lower.diff
+$ui_vpane.lower add $ui_vpane.lower.commarea
+$ui_vpane add $ui_vpane.lower
+$ui_vpane.lower pane $ui_vpane.lower.diff -weight 1
+$ui_vpane.lower pane $ui_vpane.lower.commarea -weight 0
 
 # -- Commit Area Buttons and Message Buffer
 #
@@ -3442,7 +3450,8 @@ proc trace_commit_type {varname args} {
 }
 
 proc build_commit_area {w} {
-	global ui_comm ui_coml ui_comm_ctxm disable_on_lock repo_config
+	global ui_comm ui_coml ui_comm_ctxm disable_on_lock repo_config ui_commarea
+	set ui_commarea $w
 
 	ttk::frame $w.buttons
 	ttk::label $w.buttons.l -text {} \
@@ -3559,7 +3568,7 @@ proc build_commit_area {w} {
 		-command do_signoff
 	set ui_comm_ctxm $ctxm
 }
-build_commit_area .vpane.lower.commarea
+build_commit_area $ui_vpane.lower.commarea
 trace add variable commit_type write trace_commit_type
 
 # -- Diff Header
@@ -3660,7 +3669,7 @@ proc build_diff_header {w} {
 	}
 	bind $w.header.path <Double-Button-2> {copy_diff_path_unix}
 }
-build_diff_header .vpane.lower.diff
+build_diff_header $ui_vpane.lower.diff
 
 # -- Diff Body
 #
@@ -3769,8 +3778,8 @@ proc build_diff_body {w} {
 
 	$ui_diff tag raise sel
 }
-pack .vpane.lower.diff.header -side top -fill x
-build_diff_body .vpane.lower.diff
+pack $ui_vpane.lower.diff.header -side top -fill x
+build_diff_body $ui_vpane.lower.diff
 
 # -- Diff Body Context Menu
 #
@@ -4021,9 +4030,9 @@ proc on_application_mapped {} {
 	global repo_config
 	bind . <Map> {}
 	set gm $repo_config(gui.geometry)
-	bind .vpane <Map> \
+	bind $::ui_vpane <Map> \
 		[list on_ttk_pane_mapped %W 0 [lindex $gm 1]]
-	bind .vpane.files <Map> \
+	bind $::ui_vpane_files <Map> \
 		[list on_ttk_pane_mapped %W 0 [lindex $gm 2]]
 	wm geometry . [lindex $gm 0]
 }

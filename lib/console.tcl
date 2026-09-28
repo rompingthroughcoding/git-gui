@@ -99,8 +99,8 @@ method _init {} {
 # visible underneath it.
 method _fit_area {} {
 	set pad 10
-	set hdr .vpane.lower.diff.header
-	set cmt .vpane.lower.commarea
+	set hdr $::ui_diff_hdr
+	set cmt $::ui_commarea
 
 	if {[winfo exists $hdr] && [winfo ismapped $hdr]
 	 && [winfo exists $cmt] && [winfo ismapped $cmt]} {
