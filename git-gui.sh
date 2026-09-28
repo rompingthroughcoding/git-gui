@@ -3560,8 +3560,10 @@ set ui_comm_ctxm $ctxm
 
 # -- Diff Header
 #
+# Multi-repo fork spike: the header frame path is stored in ui_diff_hdr and the
+# labels live under it, so the trace updates the active tab's diff header.
 proc trace_current_diff_path {varname args} {
-	global current_diff_path diff_actions file_states _gitworktree
+	global current_diff_path diff_actions file_states _gitworktree ui_diff_hdr
 	if {$current_diff_path eq {}} {
 		set s {}
 		set f {}
@@ -3575,80 +3577,86 @@ proc trace_current_diff_path {varname args} {
 		set o normal
 	}
 
-	.vpane.lower.diff.header.status configure -text $s
-	.vpane.lower.diff.header.file configure -text $f
-	.vpane.lower.diff.header.path configure -text $p
+	$ui_diff_hdr.status configure -text $s
+	$ui_diff_hdr.file configure -text $f
+	$ui_diff_hdr.path configure -text $p
 	foreach w $diff_actions {
 		uplevel #0 $w $o
 	}
 }
 trace add variable current_diff_path write trace_current_diff_path
 
-gold_frame .vpane.lower.diff.header
-tlabel .vpane.lower.diff.header.status \
-	-background gold \
-	-foreground black \
-	-width $max_status_desc \
-	-anchor w \
-	-justify left
-tlabel .vpane.lower.diff.header.file \
-	-background gold \
-	-foreground black \
-	-anchor w \
-	-justify left
-tlabel .vpane.lower.diff.header.path \
-	-background gold \
-	-foreground blue \
-	-anchor w \
-	-justify left \
-	-font [eval font create [font configure font_ui] -underline 1] \
-	-cursor hand2
-pack .vpane.lower.diff.header.status -side left
-pack .vpane.lower.diff.header.file -side left
-pack .vpane.lower.diff.header.path -fill x
-set ctxm .vpane.lower.diff.header.ctxm
-menu $ctxm -tearoff 0
 proc copy_diff_path_unix {} {
 	global _gitworktree current_diff_path
 	clipboard clear
 	clipboard append -format STRING -type STRING \
 		-- [file join $_gitworktree $current_diff_path]
 }
-$ctxm add command \
-	-label [mc "Copy Path"] \
-	-command {
+
+proc build_diff_header {w} {
+	global ui_diff_hdr max_status_desc diff_actions
+	set ui_diff_hdr $w.header
+	gold_frame $w.header
+	tlabel $w.header.status \
+		-background gold \
+		-foreground black \
+		-width $max_status_desc \
+		-anchor w \
+		-justify left
+	tlabel $w.header.file \
+		-background gold \
+		-foreground black \
+		-anchor w \
+		-justify left
+	tlabel $w.header.path \
+		-background gold \
+		-foreground blue \
+		-anchor w \
+		-justify left \
+		-font [eval font create [font configure font_ui] -underline 1] \
+		-cursor hand2
+	pack $w.header.status -side left
+	pack $w.header.file -side left
+	pack $w.header.path -fill x
+	set ctxm $w.header.ctxm
+	menu $ctxm -tearoff 0
+	$ctxm add command \
+		-label [mc "Copy Path"] \
+		-command {
+			clipboard clear
+			clipboard append \
+				-format STRING \
+				-type STRING \
+				-- [file nativename [file join $_gitworktree $current_diff_path]]
+		}
+	$ctxm add command \
+		-label [mc "Copy Unix Path"] \
+		-command {copy_diff_path_unix}
+	$ctxm add command \
+		-label [mc Open] \
+		-command {do_file_open $current_diff_path}
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Open in Azure DevOps"] \
+		-command {do_ado_open $current_diff_path}
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add command \
+		-label [mc "Copy Azure DevOps Link"] \
+		-command {do_ado_copy $current_diff_path}
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	bind_button3 $w.header.path "tk_popup $ctxm %X %Y"
+	bind $w.header.path <Button-1> {do_file_open $current_diff_path}
+	bind $w.header.path <Button-2> {
 		clipboard clear
 		clipboard append \
 			-format STRING \
 			-type STRING \
 			-- [file nativename [file join $_gitworktree $current_diff_path]]
 	}
-$ctxm add command \
-	-label [mc "Copy Unix Path"] \
-	-command {copy_diff_path_unix}
-$ctxm add command \
-	-label [mc Open] \
-	-command {do_file_open $current_diff_path}
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Open in Azure DevOps"] \
-	-command {do_ado_open $current_diff_path}
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-$ctxm add command \
-	-label [mc "Copy Azure DevOps Link"] \
-	-command {do_ado_copy $current_diff_path}
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-bind_button3 .vpane.lower.diff.header.path "tk_popup $ctxm %X %Y"
-bind .vpane.lower.diff.header.path <Button-1> {do_file_open $current_diff_path}
-bind .vpane.lower.diff.header.path <Button-2> {
-	clipboard clear
-	clipboard append \
-		-format STRING \
-		-type STRING \
-		-- [file nativename [file join $_gitworktree $current_diff_path]]
+	bind $w.header.path <Double-Button-2> {copy_diff_path_unix}
 }
-bind .vpane.lower.diff.header.path <Double-Button-2> {copy_diff_path_unix}
+build_diff_header .vpane.lower.diff
 
 # -- Diff Body
 #
