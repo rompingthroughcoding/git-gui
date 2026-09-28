@@ -3317,18 +3317,21 @@ default {
 
 # -- Branch Control
 #
-ttk::frame .branch
-ttk::label .branch.l1 \
-	-text [mc "Current Branch:"] \
-	-anchor w \
-	-justify left
-ttk::label .branch.cb \
-	-textvariable current_branch \
-	-anchor w \
-	-justify left
-pack .branch.l1 -side left
-pack .branch.cb -side left -fill x
-pack .branch -side top -fill x
+proc build_branch_control {w} {
+	ttk::frame $w
+	ttk::label $w.l1 \
+		-text [mc "Current Branch:"] \
+		-anchor w \
+		-justify left
+	ttk::label $w.cb \
+		-textvariable current_branch \
+		-anchor w \
+		-justify left
+	pack $w.l1 -side left
+	pack $w.cb -side left -fill x
+	pack $w -side top -fill x
+}
+build_branch_control .branch
 
 # -- Main Window Layout
 #
