@@ -2,22 +2,28 @@
 #
 # Proof-of-concept for a git-gui fork where multi-repo is a first-class feature:
 # instead of one process per repository glued together by the master hub, a
-# single process holds several repositories, each with its own state living in
-# a context object rather than in singleton globals.
+# single process holds several repositories, each with its own state.
 #
-# This spike converts the repo-identity subsystem (gitdir / worktree /
-# reponame / prefix), which is already funneled through the gitdir/reponame
-# accessor procs, so the conversion is non-breaking: the app still runs
-# single-repo, but repo identity now genuinely lives in a switchable context.
-# See the GITGUI_CTX_SELFTEST self-test in git-gui.sh for a demonstration that
-# two contexts coexist and can be switched between within one interpreter.
+# Rewriting git-gui's hundreds of `global HEAD` / `global current_diff_path`
+# sites into accessor calls is impractical, so this context uses a
+# *context-swap* model: the singleton globals hold the ACTIVE repo's state, and
+# each context stores a snapshot of them. Switching context saves the outgoing
+# repo's globals back into its context and restores the incoming one's, so
+# subsystem code keeps reading/writing the globals unchanged.
+#
+# `managed` lists the globals that belong to a repository. This spike covers
+# repo identity (gitdir/worktree/reponame/prefix) plus the first live example,
+# current_diff_path; a real fork would extend it with HEAD, PARENT, commit_type,
+# file_states, etc. See the GITGUI_CTX_SELFTEST self-test in git-gui.sh.
 
 namespace eval repoctx {
-	variable contexts       ;# id -> dict {gitdir worktree reponame prefix}
+	variable contexts       ;# id -> dict of managed-global snapshots
 	array set contexts {}
 	variable order   {}     ;# registration order of ids
 	variable current {}     ;# active context id
 	variable seq     0
+	# Globals that hold the active repo's state; saved/restored on switch.
+	variable managed {_gitdir _gitworktree _reponame _prefix current_diff_path}
 }
 
 # Register a repository's identity as a new context and make it current.
@@ -28,25 +34,40 @@ proc repoctx::register {gitdir worktree reponame prefix} {
 	variable seq
 	set id ctx[incr seq]
 	set contexts($id) [dict create \
-		gitdir $gitdir worktree $worktree reponame $reponame prefix $prefix]
+		_gitdir $gitdir _gitworktree $worktree _reponame $reponame \
+		_prefix $prefix current_diff_path {}]
 	lappend order $id
 	use $id
 	return $id
 }
 
-# Switch the active context. Keeps the legacy _gitdir/_gitworktree/_reponame/
-# _prefix globals in sync so any code still reading them raw (subsystems not
-# yet converted) sees the active repository.
+# Save the active repo's managed globals back into context $id.
+proc repoctx::_save {id} {
+	variable contexts
+	variable managed
+	if {![info exists contexts($id)]} return
+	foreach v $managed {
+		if {[info exists ::$v]} { dict set contexts($id) $v [set ::$v] }
+	}
+}
+
+# Restore context $id's managed globals into the live singletons.
+proc repoctx::_load {id} {
+	variable contexts
+	variable managed
+	foreach v $managed {
+		if {[dict exists $contexts($id) $v]} { set ::$v [dict get $contexts($id) $v] }
+	}
+}
+
+# Switch the active context: snapshot the outgoing repo, restore the incoming.
 proc repoctx::use {id} {
 	variable contexts
 	variable current
 	if {![info exists contexts($id)]} { error "repoctx: unknown context $id" }
+	if {$current ne {} && $current ne $id} { _save $current }
 	set current $id
-	global _gitdir _gitworktree _reponame _prefix
-	set _gitdir      [dict get $contexts($id) gitdir]
-	set _gitworktree [dict get $contexts($id) worktree]
-	set _reponame    [dict get $contexts($id) reponame]
-	set _prefix      [dict get $contexts($id) prefix]
+	_load $id
 	return $id
 }
 
@@ -69,20 +90,16 @@ proc repoctx::forget {id} {
 	if {$current eq $id} { set current [lindex $order end] }
 }
 
-# Read a field from the active context. Before any context is registered (early
-# startup), fall back to the legacy global so accessor calls still work.
+# Read an identity field from the active context (used by the gitdir/reponame
+# accessors). Falls back to the live global before any context is registered.
 proc repoctx::field {key} {
 	variable contexts
 	variable current
+	set gk [dict get {gitdir _gitdir worktree _gitworktree \
+		reponame _reponame prefix _prefix} $key]
 	if {$current ne {} && [info exists contexts($current)]
-	 && [dict exists $contexts($current) $key]} {
-		return [dict get $contexts($current) $key]
+	 && [dict exists $contexts($current) $gk]} {
+		return [dict get $contexts($current) $gk]
 	}
-	switch -- $key {
-		gitdir   { return [expr {[info exists ::_gitdir]      ? $::_gitdir      : {}}] }
-		worktree { return [expr {[info exists ::_gitworktree] ? $::_gitworktree : {}}] }
-		reponame { return [expr {[info exists ::_reponame]    ? $::_reponame    : {}}] }
-		prefix   { return [expr {[info exists ::_prefix]      ? $::_prefix      : {}}] }
-	}
-	return {}
+	return [expr {[info exists ::$gk] ? [set ::$gk] : {}}]
 }
