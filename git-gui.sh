@@ -1435,6 +1435,7 @@ proc rescan {after {honor_trustmtime 1}} {
 	}
 	if {$rescan_active > 0 || ![lock_index read]} return
 	set rescan_owner [repoctx::current]
+	catch {tools_base_invalidate}
 
 	repository_state newType newHEAD newMERGE_HEAD
 	if {[string match amend* $commit_type]
