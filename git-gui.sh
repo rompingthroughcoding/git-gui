@@ -377,12 +377,6 @@ set _githtmldir {}
 set _reponame {}
 set _shellpath {@@SHELL_PATH@@}
 
-# Set by git-gui-master when this instance is reparented into a container
-# tab via wish -use; suppresses wm geometry/state restore that would
-# otherwise detach the window from its container.
-set _embedded [expr {[info exists env(GIT_GUI_EMBEDDED)] \
-	&& $env(GIT_GUI_EMBEDDED) ne {}}]
-
 set _trace [lsearch -exact $argv --trace]
 if {$_trace >= 0} {
 	set argv [lreplace $argv $_trace $_trace]
@@ -696,7 +690,7 @@ proc rmsel_tag {text} {
 	return $text
 }
 
-if {!$_embedded} { wm withdraw . }
+wm withdraw .
 set root_exists 0
 bind . <Visibility> {
 	bind . <Visibility> {}
@@ -1063,8 +1057,27 @@ if {$subcommand eq {gui.sh}} {
 	set subcommand gui
 }
 if {$subcommand eq {gui} && [llength $argv] > 0} {
-	set subcommand [lindex $argv 0]
-	set argv [lrange $argv 1 end]
+	set a [lindex $argv 0]
+	if {[file isdirectory $a]} {
+		# One or more repository path arguments: open each in its own tab.
+		# The first is the primary repo used for normal startup; the rest are
+		# opened as extra tabs once the UI is ready.
+		set _multi_repo_paths {}
+		foreach p $argv {
+			if {[file isdirectory $p]} {
+				lappend _multi_repo_paths [file normalize $p]
+			}
+		}
+		set argv {}
+		# Explicit paths win over any GIT_DIR/GIT_WORK_TREE inherited from the
+		# launching environment; point startup discovery at the first path.
+		catch {unset env(GIT_DIR)}
+		catch {unset env(GIT_WORK_TREE)}
+		catch {cd [lindex $_multi_repo_paths 0]}
+	} else {
+		set subcommand $a
+		set argv [lrange $argv 1 end]
+	}
 }
 
 enable_option multicommit
@@ -1292,6 +1305,7 @@ set nullid2 "[string repeat 0 [expr $hashlength - 1]]1"
 ## task management
 
 set rescan_active 0
+set rescan_owner {}
 set diff_active 0
 set last_clicked {}
 
@@ -1304,6 +1318,8 @@ proc lock_index {type} {
 	if {$index_lock_type eq {none}} {
 		set index_lock_type $type
 		foreach w $disable_on_lock {
+			# Skip widgets from closed tabs that no longer exist.
+			if {![winfo exists [lindex $w 0]]} continue
 			uplevel #0 $w disabled
 		}
 		return 1
@@ -1319,6 +1335,7 @@ proc unlock_index {} {
 
 	set index_lock_type none
 	foreach w $disable_on_lock {
+		if {![winfo exists [lindex $w 0]]} continue
 		uplevel #0 $w normal
 	}
 }
@@ -1381,14 +1398,43 @@ proc force_amend {} {
 	do_select_commit_type
 }
 
+# Rescan runs asynchronously via fileevent callbacks that write to the live
+# globals (file_states, ui_* widgets, HEAD/commit_type). If the user switches
+# tabs while a rescan is in flight, those writes must still land on the repo the
+# rescan was started for. Wrap each callback so it runs in its origin context and
+# restores the active one afterward. If the origin tab was closed mid-rescan the
+# callback is dropped (and its pipe closed) rather than corrupting the now-active
+# repo. Rescans are serialized (rescan_active), so only one is ever in flight.
+proc rescan_dispatch {cmd} {
+	global rescan_owner
+	if {$rescan_owner ne {} && [lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		catch {close [lindex $cmd 1]}
+		return
+	}
+	set prev [repoctx::current]
+	set swap [expr {$rescan_owner ne {} && $rescan_owner ne $prev}]
+	if {$swap} { repoctx::use $rescan_owner }
+	set code [catch {uplevel #0 $cmd} res opts]
+	if {$swap} { catch {repoctx::use $prev} }
+	return -options $opts $res
+}
+
 proc rescan {after {honor_trustmtime 1}} {
 	global HEAD PARENT MERGE_HEAD commit_type
 	global ui_index ui_workdir ui_comm
-	global rescan_active file_states
+	global rescan_active rescan_owner file_states
 	global repo_config
 	global force_prepare_commit_msg
 
+	# Self-heal: a rescan whose tab was closed mid-scan may have left the shared
+	# lock set; clear it so this rescan can proceed.
+	if {$rescan_active > 0 && $rescan_owner ne {}
+		&& [lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		set rescan_active 0
+		catch {unlock_index}
+	}
 	if {$rescan_active > 0 || ![lock_index read]} return
+	set rescan_owner [repoctx::current]
 
 	repository_state newType newHEAD newMERGE_HEAD
 	if {[string match amend* $commit_type]
@@ -1438,7 +1484,7 @@ proc rescan {after {honor_trustmtime 1}} {
 			]]
 		fconfigure $fd_rf -blocking 0 -translation binary
 		fileevent $fd_rf readable \
-			[list rescan_stage2 $fd_rf $after]
+			[list rescan_dispatch [list rescan_stage2 $fd_rf $after]]
 	}
 }
 
@@ -1469,13 +1515,13 @@ proc rescan_stage2 {fd after} {
 	fconfigure $fd_di -blocking 0 -translation binary
 	fconfigure $fd_df -blocking 0 -translation binary
 
-	fileevent $fd_di readable [list read_diff_index $fd_di $after]
-	fileevent $fd_df readable [list read_diff_files $fd_df $after]
+	fileevent $fd_di readable [list rescan_dispatch [list read_diff_index $fd_di $after]]
+	fileevent $fd_df readable [list rescan_dispatch [list read_diff_files $fd_df $after]]
 
 	if {[is_config_true gui.displayuntracked]} {
 		set fd_lo [git_read [concat ls-files --others -z $ls_others]]
 		fconfigure $fd_lo -blocking 0 -translation binary
-		fileevent $fd_lo readable [list read_ls_others $fd_lo $after]
+		fileevent $fd_lo readable [list rescan_dispatch [list read_ls_others $fd_lo $after]]
 		incr rescan_active
 	}
 }
@@ -2828,6 +2874,13 @@ menu .mbar.repository
 .mbar.repository add command \
 	-label [mc "Open Repository In New Tab..."] \
 	-command do_open_repo_tab
+menu .mbar.repository.recent -postcommand populate_recent_tab_menu
+.mbar.repository add cascade \
+	-label [mc "Open Recent In New Tab"] \
+	-menu .mbar.repository.recent
+.mbar.repository add command \
+	-label [mc "Close Tab"] \
+	-command close_repo_tab
 .mbar.repository add separator
 
 if {![is_bare]} {
@@ -3271,7 +3324,7 @@ blame {
 		set current_branch $head
 	}
 
-	if {!$_embedded} { wm deiconify . }
+	wm deiconify .
 	switch -- $subcommand {
 	browser {
 		if {$jump_spec ne {}} usage
@@ -3343,8 +3396,53 @@ proc build_branch_control {w} {
 # exposed as globals for the sash geometry save/restore and console sizing.
 ttk::notebook .repotabs
 pack .repotabs -side top -fill both -expand 1
+
+# Draw a distinct border/divider between tabs. The native Windows (vista) theme
+# ignores custom tab border colors, so borrow clam's tab element -- which honors
+# -bordercolor -- for this notebook only, leaving the rest of the app native.
+ttk::style configure Repo.TNotebook -tabmargins {4 2 4 0}
+if {![catch {
+	ttk::style element create RepoTab.tab from clam Notebook.tab
+}]} {
+	ttk::style layout Repo.TNotebook.Tab {
+		RepoTab.tab -sticky nswe -children {
+			Notebook.padding -side top -sticky nswe -children {
+				Notebook.label -side top -sticky nswe
+			}
+		}
+	}
+	ttk::style configure Repo.TNotebook.Tab \
+		-padding {14 5} -borderwidth 2 -bordercolor #4d4d4d -background #d9d9d9
+	ttk::style map Repo.TNotebook.Tab \
+		-background {selected #ffffff} \
+		-bordercolor {selected #1a1a1a}
+} else {
+	ttk::style configure Repo.TNotebook.Tab -padding {14 5}
+}
+.repotabs configure -style Repo.TNotebook
+
+# Give every tab a distinct color swatch so repos are easy to tell apart even
+# when their folder names collide. Colors cycle through a fixed palette; the
+# swatch is a bold color chip shown left of the repo name in the tab strip.
+set repo_tab_palette {
+	#4e79a7 #59a14f #e15759 #b07aa1 #f28e2b
+	#76b7b2 #edc948 #ff9da7 #9c755f #bab0ac}
+set repo_tab_swatch_seq 0
+# Return a solid color-chip image for tab $w, cycling through the palette.
+proc repo_tab_decorate {w} {
+	global repo_tab_palette repo_tab_swatch_seq
+	set color [lindex $repo_tab_palette \
+		[expr {$repo_tab_swatch_seq % [llength $repo_tab_palette]}]]
+	set n [incr repo_tab_swatch_seq]
+	set img repo_tab_swatch_$n
+	image create photo $img -width 22 -height 18
+	$img put $color -to 0 0 22 18
+	return $img
+}
+
 ttk::frame .repotabs.repo0
-.repotabs add .repotabs.repo0 -text $_reponame
+.repotabs add .repotabs.repo0 -text $_reponame \
+	-image [repo_tab_decorate .repotabs.repo0] -compound left
 
 # Build one repository's entire UI under tab frame $w. Every panel sets its ui_*
 # path globals relative to $w, so switching repoctx to a repo repoints all the
@@ -3433,6 +3531,13 @@ foreach i [list $ui_index $ui_workdir] {
 	set_selection_colors $i 0
 	bind $i <FocusIn>	{ set_selection_colors %W 1 }
 	bind $i <FocusOut>	{ set_selection_colors %W 0 }
+	bind $i <Button-1>         { toggle_or_diff click %W %x %y; break }
+	bind $i <$::M1B-Button-1>  { add_one_to_selection %W %x %y; break }
+	bind $i <Shift-Button-1>   { add_range_to_selection %W %x %y; break }
+	bind $i <Key-Up>           { toggle_or_diff up %W; break }
+	bind $i <Key-Down>         { toggle_or_diff down %W; break }
+	set ::file_lists_last_clicked($i) {}
+	set ::file_lists($i) [list]
 }
 unset i
 
@@ -3453,6 +3558,7 @@ $ui_vpane.lower pane $ui_vpane.lower.commarea -weight 0
 # ui_comm_ctxm pointed at it; trace_commit_type updates the active tab's label.
 proc trace_commit_type {varname args} {
 	global ui_coml commit_type
+	if {$ui_coml eq {} || ![winfo exists $ui_coml]} return
 	switch -glob -- $commit_type {
 	initial       {set txt [mc "Initial Commit Message:"]}
 	amend         {set txt [mc "Amended Commit Message:"]}
@@ -3586,7 +3692,7 @@ proc build_commit_area {w} {
 build_commit_area $ui_vpane.lower.commarea
 if {![info exists ::_gg_trace_ct]} {
 	set ::_gg_trace_ct 1
-	trace add variable commit_type write trace_commit_type
+	trace add variable ::commit_type write trace_commit_type
 }
 
 # -- Diff Header
@@ -3595,6 +3701,7 @@ if {![info exists ::_gg_trace_ct]} {
 # labels live under it, so the trace updates the active tab's diff header.
 proc trace_current_diff_path {varname args} {
 	global current_diff_path diff_actions file_states _gitworktree ui_diff_hdr
+	if {$ui_diff_hdr eq {} || ![winfo exists $ui_diff_hdr.status]} return
 	if {$current_diff_path eq {}} {
 		set s {}
 		set f {}
@@ -3617,7 +3724,7 @@ proc trace_current_diff_path {varname args} {
 }
 if {![info exists ::_gg_trace_cdp]} {
 	set ::_gg_trace_cdp 1
-	trace add variable current_diff_path write trace_current_diff_path
+	trace add variable ::current_diff_path write trace_current_diff_path
 }
 
 proc copy_diff_path_unix {} {
@@ -4048,6 +4155,42 @@ build_repo_ui .repotabs.repo0
 # repo context and cd to its worktree (git-gui runs git via the process cwd).
 array set tab_ctx {}
 set tab_ctx(.repotabs.repo0) [repoctx::current]
+# Monotonic tab-frame counter; never reused, so closing a tab can't collide with
+# a later-opened one (widget names must stay unique under .repotabs).
+set _repo_tab_seq 0
+
+# Refresh HEAD/commit_type/branch for the ACTIVE repo. These are otherwise only
+# restored from a context snapshot that can be stale -- e.g. saved as "initial"
+# or with an empty PARENT before the repo's initial rescan finished when several
+# repos open at once -- which made amend fail with "nothing to amend". An
+# in-progress amend is left untouched so it is not lost.
+proc refresh_commit_state {} {
+	global commit_type HEAD PARENT MERGE_HEAD
+	if {[string match amend* $commit_type]} return
+	if {![catch {repository_state ct hd mh}]} {
+		set HEAD $hd
+		set PARENT $hd
+		set MERGE_HEAD $mh
+		set commit_type $ct
+	}
+}
+
+proc refresh_active_commit_state {} {
+	global commit_type commit_type_is_amend
+	if {[string match amend* $commit_type]} {
+		catch {load_current_branch}
+	} else {
+		refresh_commit_state
+	}
+	# Keep the amend checkbox in sync with this tab's commit_type.
+	set commit_type_is_amend [string match amend* $commit_type]
+}
+
+# Set the main window title to the active repo (name + worktree path).
+proc set_repo_window_title {} {
+	catch {wm title . "[reponame] [file normalize $::_gitworktree]"}
+}
+
 proc on_repo_tab_changed {} {
 	global tab_ctx
 	set w [.repotabs select]
@@ -4055,8 +4198,68 @@ proc on_repo_tab_changed {} {
 	if {[repoctx::current] eq $tab_ctx($w)} return
 	repoctx::use $tab_ctx($w)
 	catch {cd [repoctx::field worktree]}
+	# Refresh commit state (HEAD/commit_type/branch) for the now-active repo.
+	catch {refresh_active_commit_state}
+	catch {set_repo_window_title}
+	# repo_config is now the active repo's; rebuild the shared Tools menu so
+	# per-repo guitools (e.g. includeIf gitdir entries) match the active tab.
+	if {[info exists ::tools_menubar]} { tools_populate_all }
 }
 bind .repotabs <<NotebookTabChanged>> on_repo_tab_changed
+bind .repotabs <Button-2> {close_repo_tab_at %x %y; break}
+
+# Ctrl-Tab / Ctrl-Shift-Tab cycle through the repository tabs (built-in ttk).
+ttk::notebook::enableTraversal .repotabs
+
+# Reorder tabs by dragging within the tab strip: remember the tab the drag
+# started on, and as the pointer moves over a different tab position, move the
+# dragged tab there via the notebook's insert.
+set _repo_tab_drag {}
+proc repo_tab_drag_press {x y} {
+	global _repo_tab_drag
+	set _repo_tab_drag {}
+	catch {set _repo_tab_drag [.repotabs index @$x,$y]}
+}
+proc repo_tab_drag_motion {x y} {
+	global _repo_tab_drag
+	if {$_repo_tab_drag eq {}} return
+	if {[catch {.repotabs index @$x,$y} idx]} return
+	if {$idx eq $_repo_tab_drag} return
+	catch {.repotabs insert $idx [lindex [.repotabs tabs] $_repo_tab_drag]}
+	set _repo_tab_drag $idx
+}
+proc repo_tab_drag_release {} {
+	global _repo_tab_drag
+	set _repo_tab_drag {}
+}
+bind .repotabs <ButtonPress-1>   {repo_tab_drag_press %x %y}
+bind .repotabs <B1-Motion>       {repo_tab_drag_motion %x %y}
+bind .repotabs <ButtonRelease-1> {repo_tab_drag_release}
+
+# Record $wt as the most-recent repository without duplicating: drop any prior
+# entry for the same path, append it, then trim to gui.maxrecentrepo. Operates
+# directly on git config so it never disturbs the active repo context (unlike
+# the chooser's _append_recentrepos, which reloads config).
+proc _record_recent_repo {wt} {
+	set wt [file normalize $wt]
+	set re $wt
+	regsub -all -- {([()\[\]{}\.^$+*?\\])} $re {\\\1} re
+	catch {exec git config --global --unset-all gui.recentrepo "^$re\$"}
+	catch {exec git config --global --add gui.recentrepo $wt}
+	if {[catch {set maxrecent [exec git config --get gui.maxrecentrepo]}]} {
+		set maxrecent 10
+	}
+	if {![string is integer -strict $maxrecent] || $maxrecent <= 0} return
+	if {[catch {set recent [exec git config --global --get-all gui.recentrepo]}]} return
+	set recent [split $recent "\n"]
+	while {[llength $recent] > $maxrecent} {
+		set old [lindex $recent 0]
+		set ore $old
+		regsub -all -- {([()\[\]{}\.^$+*?\\])} $ore {\\\1} ore
+		catch {exec git config --global --unset-all gui.recentrepo "^$ore\$"}
+		set recent [lrange $recent 1 end]
+	}
+}
 
 # Open another repository in a new tab: discover its git dirs, register a fresh
 # repoctx, build its UI under a new tab, load its config, and rescan.
@@ -4078,14 +4281,18 @@ proc open_repo_context {path} {
 	set pfx {}
 	catch {set pfx [string trim [git rev-parse --show-prefix]]}
 	set rn [file tail $wt]
+	_record_recent_repo $wt
 
-	set w .repotabs.repo[llength [repoctx::ids]]
+	set w .repotabs.repo[incr ::_repo_tab_seq]
 	ttk::frame $w
-	.repotabs add $w -text $rn
+	.repotabs add $w -text $rn -image [repo_tab_decorate $w] -compound left
 
 	repoctx::open_context $gd $wt $rn $pfx
 	cd $wt
 	load_config 0
+	# Set the branch synchronously so this context saves the correct value when
+	# switched away from, before its async do_rescan below completes.
+	catch {load_current_branch}
 	# apply_config does one-time global theming (fonts/theme/pave_toplevel)
 	# already done at startup; for an extra repo we only need its comment char.
 	set ::comment_string [get_config core.commentstring]
@@ -4096,12 +4303,111 @@ proc open_repo_context {path} {
 	set tab_ctx($w) [repoctx::current]
 
 	.repotabs select $w
+	# The tab-changed handler short-circuits when the new tab is already the
+	# active context, so populate this repo's Tools menu and title explicitly.
+	if {[info exists ::tools_menubar]} { tools_populate_all }
+	catch {set_repo_window_title}
 	do_rescan
 }
 
 proc do_open_repo_tab {} {
 	set p [tk_chooseDirectory -title [mc "Open Repository In New Tab"] -mustexist 1]
 	if {$p ne {}} { open_repo_context $p }
+}
+
+# Existing repositories from the global recent list (deduped, still present),
+# newest first and capped at gui.maxrecentrepo (Edit > Options).
+proc recent_repo_paths {} {
+	set r {}
+	catch {set r [get_config gui.recentrepo]}
+	if {$r eq {}} {
+		catch {set r [split [string trim \
+			[exec git config --global --get-all gui.recentrepo]] "\n"]}
+	}
+	if {[set maxrecent [get_config gui.maxrecentrepo]] eq {}} {
+		set maxrecent 10
+	}
+	set out {}
+	# git config lists oldest first; walk newest first and dedupe by first seen.
+	foreach p [lreverse $r] {
+		if {$p eq {} || [lsearch -exact $out $p] >= 0} continue
+		if {![file isdirectory $p]} continue
+		lappend out $p
+		if {$maxrecent > 0 && [llength $out] >= $maxrecent} break
+	}
+	return $out
+}
+
+proc populate_recent_tab_menu {} {
+	set m .mbar.repository.recent
+	$m delete 0 end
+	set recent [recent_repo_paths]
+	if {[llength $recent] == 0} {
+		$m add command -label [mc "(no recent repositories)"] -state disabled
+		return
+	}
+	foreach p $recent {
+		$m add command -label $p -command [list open_repo_context $p]
+	}
+}
+
+# Close the active repository tab (quit if it is the last one).
+proc close_repo_tab_widget {w} {
+	global tab_ctx
+	if {$w eq {}} return
+	if {[llength [.repotabs tabs]] <= 1} { do_quit ; return }
+	set ctx {}
+	catch {set ctx $tab_ctx($w)}
+	set closing_active [expr {[.repotabs select] eq $w}]
+
+	if {$closing_active} {
+		# Pick the tab to activate after this closes (next one, else previous).
+		set tabs [.repotabs tabs]
+		set idx [lsearch -exact $tabs $w]
+		set rest [lreplace $tabs $idx $idx]
+		if {$idx < [llength $rest]} {
+			set stab [lindex $rest $idx]
+		} else {
+			set stab [lindex $rest end]
+		}
+		# Activate the survivor's context BEFORE destroying this tab. The
+		# closing repo's widgets are about to vanish, so load the survivor
+		# without saving the outgoing (now-invalid) globals back into any
+		# context.
+		if {$stab ne {} && [info exists tab_ctx($stab)]} {
+			repoctx::reload $tab_ctx($stab)
+			catch {cd [repoctx::field worktree]}
+		}
+	}
+
+	unset -nocomplain tab_ctx($w)
+	.repotabs forget $w
+	destroy $w
+	if {$ctx ne {}} { repoctx::forget $ctx }
+
+	# Drop this tab's widgets from the index-lock list so a later lock_index
+	# never touches the destroyed widgets.
+	global disable_on_lock
+	set kept {}
+	foreach e $disable_on_lock {
+		if {[string match $w.* [lindex $e 0]]} continue
+		lappend kept $e
+	}
+	set disable_on_lock $kept
+
+	if {$closing_active} {
+		catch {.repotabs select $stab}
+		catch {refresh_active_commit_state}
+		catch {set_repo_window_title}
+		if {[info exists ::tools_menubar]} { tools_populate_all }
+	}
+}
+
+proc close_repo_tab {} { close_repo_tab_widget [.repotabs select] }
+
+proc close_repo_tab_at {x y} {
+	if {[catch {.repotabs index @$x,$y} idx]} return
+	close_repo_tab_widget [lindex [.repotabs tabs] $idx]
 }
 
 # -- Status Bar
@@ -4126,14 +4432,14 @@ proc on_application_mapped {} {
 		[list on_ttk_pane_mapped %W 0 [lindex $gm 2]]
 	wm geometry . [lindex $gm 0]
 }
-if {[info exists repo_config(gui.geometry)] && !$_embedded} {
+if {[info exists repo_config(gui.geometry)]} {
 	bind . <Map> [list on_application_mapped]
 	wm geometry . [lindex $repo_config(gui.geometry) 0]
 }
 
 # -- Load window state
 #
-if {[info exists repo_config(gui.wmstate)] && !$_embedded} {
+if {[info exists repo_config(gui.wmstate)]} {
 	catch {wm state . $repo_config(gui.wmstate)}
 }
 
@@ -4221,27 +4527,13 @@ bind .   <$M1B-Key-plus> {show_more_context;break}
 bind .   <$M1B-Key-KP_Add> {show_more_context;break}
 bind .   <$M1B-Key-Return> do_commit
 bind .   <$M1B-Key-KP_Enter> do_commit
-foreach i [list $ui_index $ui_workdir] {
-	bind $i <Button-1>       { toggle_or_diff click %W %x %y; break }
-	bind $i <$M1B-Button-1>  { add_one_to_selection %W %x %y; break }
-	bind $i <Shift-Button-1> { add_range_to_selection %W %x %y; break }
-	bind $i <Key-Up>         { toggle_or_diff up %W; break }
-	bind $i <Key-Down>       { toggle_or_diff down %W; break }
-}
-unset i
 
 bind .   <Alt-Key-1> {focus_widget $::ui_workdir}
 bind .   <Alt-Key-2> {focus_widget $::ui_index}
 bind .   <Alt-Key-3> {focus $::ui_diff}
 bind .   <Alt-Key-4> {focus $::ui_comm}
 
-set file_lists_last_clicked($ui_index) {}
-set file_lists_last_clicked($ui_workdir) {}
-
-set file_lists($ui_index) [list]
-set file_lists($ui_workdir) [list]
-
-wm title . "[reponame] [file normalize $_gitworktree]"
+set_repo_window_title
 focus -force $ui_comm
 
 # -- Only initialize complex UI if we are going to stay running.
@@ -4384,43 +4676,24 @@ if {$picked && [is_config_true gui.autoexplore]} {
 # Clear "Initializing..." status
 after 500 {$main_status show ""}
 
-# When docked, report new NON-modal tool windows (blame/browser/console) to the
-# master so it can pull them into their own tabs. Modal dialogs hold a grab and
-# are left floating.
-proc _dock_toplevels {} {
-	set res {}
-	foreach w [winfo children .] {
-		if {[winfo toplevel $w] eq $w} { lappend res $w }
+# Open any additional repositories passed on the command line as extra tabs, one
+# at a time: rescans are serialized, so opening them all at once would leave the
+# later repos un-scanned. Wait for the current rescan to finish before each open.
+proc open_repos_sequentially {paths} {
+	global rescan_active
+	if {[llength $paths] == 0} return
+	if {$rescan_active > 0} {
+		after 100 [list open_repos_sequentially $paths]
+		return
 	}
-	return $res
+	open_repo_context [lindex $paths 0]
+	after 100 [list open_repos_sequentially [lrange $paths 1 end]]
 }
-proc _dock_register {top} {
-	if {![winfo exists $top]} return
-	if {![winfo ismapped $top]} { after 300 [list _dock_register $top]; return }
-	if {[grab status $top] ne {none}} return
-	if {[grab current] eq $top} return
-	set label [wm title $top]
-	if {$label eq {}} { set label [string trimleft $top .] }
-	catch {
-		set fh [open $::env(GIT_GUI_DOCK_REQUESTS) a]
-		# Report the decorative wrapper (wm frame), not the inner content
-		# window (winfo id) - the wrapper is the real top-level to dock.
-		puts $fh "[wm frame $top]\t$label"
-		close $fh
+if {[info exists _multi_repo_paths]} {
+	set _rest [lrange $_multi_repo_paths 1 end]
+	if {[llength $_rest] > 0} {
+		after idle [list open_repos_sequentially $_rest]
 	}
-}
-proc _dock_scan {} {
-	global _dock_seen
-	foreach top [_dock_toplevels] {
-		if {[lsearch -exact $_dock_seen $top] >= 0} continue
-		lappend _dock_seen $top
-		after 150 [list _dock_register $top]
-	}
-	after 350 _dock_scan
-}
-if {$_embedded && [info exists env(GIT_GUI_DOCK_REQUESTS)]} {
-	set _dock_seen {}
-	after 400 _dock_scan
 }
 
 # Local variables:

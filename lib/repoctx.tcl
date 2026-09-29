@@ -99,19 +99,27 @@ proc repoctx::_save {id} {
 }
 
 # Restore context $id's managed globals into the live singletons.
+# Arrays are restored before scalars: setting current_diff_path fires its write
+# trace, which reads file_states($path), so file_states must already hold the
+# incoming repo's state or the trace errors on a path from the other tab.
 proc repoctx::_load {id} {
 	variable contexts
 	variable managed
 	variable managed_arrays
-	foreach v $managed {
-		if {[dict exists $contexts($id) $v]} { set ::$v [dict get $contexts($id) $v] }
-	}
 	foreach v $managed_arrays {
 		if {[dict exists $contexts($id) $v]} {
 			array unset ::$v
 			array set ::$v [dict get $contexts($id) $v]
 		}
 	}
+	foreach v $managed {
+		if {[dict exists $contexts($id) $v]} { set ::$v [dict get $contexts($id) $v] }
+	}
+	# current_diff_path is restored before ui_diff_hdr/diff_actions above, so its
+	# write trace ran against the previous tab's diff header. Re-fire it now that
+	# every managed global is the incoming repo's, so the diff header (the gold
+	# banner) reflects this tab.
+	catch {set ::current_diff_path $::current_diff_path}
 	# git-gui targets a repo via the GIT_DIR/GIT_WORK_TREE env vars, not just
 	# cwd; keep them in step with the active repo.
 	catch {set ::env(GIT_DIR) $::_gitdir}
@@ -124,6 +132,18 @@ proc repoctx::use {id} {
 	variable current
 	if {![info exists contexts($id)]} { error "repoctx: unknown context $id" }
 	if {$current ne {} && $current ne $id} { _save $current }
+	set current $id
+	_load $id
+	return $id
+}
+
+# Load context $id into the live singletons WITHOUT saving the outgoing context.
+# Used when the outgoing repo's widgets have just been destroyed (its tab was
+# closed), so its live globals are stale and must not be written back.
+proc repoctx::reload {id} {
+	variable contexts
+	variable current
+	if {![info exists contexts($id)]} { error "repoctx: unknown context $id" }
 	set current $id
 	_load $id
 	return $id
