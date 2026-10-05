@@ -852,6 +852,7 @@ set default_config(gui.maxrecentrepo) 10
 set default_config(gui.copyblamethreshold) 40
 set default_config(gui.blamehistoryctx) 7
 set default_config(gui.diffcontext) 5
+set default_config(gui.diffwholefile) false
 set default_config(gui.diffopts) {}
 set default_config(gui.commitmsgwidth) 75
 set default_config(gui.newbranchtemplate) {}
@@ -3095,6 +3096,18 @@ if {[is_enabled multicommit] || [is_enabled singlecommit]} {
 		-command show_more_context \
 		-accelerator $M1T-=
 
+	.mbar.commit add checkbutton -label [mc "Always Show Entire File"] \
+		-variable diff_whole_file_ui \
+		-command diff_whole_file_changed
+
+	.mbar.commit add command -label [mc "Next Change"] \
+		-command {diff_goto_change 1} \
+		-accelerator F3
+
+	.mbar.commit add command -label [mc "Previous Change"] \
+		-command {diff_goto_change -1} \
+		-accelerator Shift-F3
+
 	.mbar.commit add separator
 
 	if {![is_enabled nocommitmsg]} {
@@ -3759,6 +3772,12 @@ proc build_diff_header {w} {
 		-cursor hand2
 	pack $w.header.status -side left
 	pack $w.header.file -side left
+	ttk::button $w.header.next -text [mc "Next Change"] \
+		-takefocus 0 -command {diff_goto_change 1}
+	ttk::button $w.header.prev -text [mc "Previous Change"] \
+		-takefocus 0 -command {diff_goto_change -1}
+	pack $w.header.next -side right -padx 2
+	pack $w.header.prev -side right -padx 2
 	pack $w.header.path -fill x
 	set ctxm $w.header.ctxm
 	menu $ctxm -tearoff 0
@@ -3853,6 +3872,12 @@ proc build_diff_body {w} {
 		-command [list $ui_diff xview]
 	ttk::scrollbar $w.body.sby -orient vertical \
 		-command diff_yview
+	# Change overview strip, packed beside the scrollbar in whole-file mode.
+	canvas $w.body.map -width 12 -highlightthickness 0 -borderwidth 0 \
+		-background #f0f0f0 -cursor {}
+	bind $w.body.map <Configure> {diff_map_draw %W}
+	bind $w.body.map <Button-1> {diff_map_click %W %y}
+	bind $w.body.map <B1-Motion> {diff_map_click %W %y}
 	pack $w.body.sbx -side bottom -fill x
 	pack $w.body.sby -side right -fill y
 	pack $ui_diff_ln -side left -fill y
@@ -3914,6 +3939,19 @@ build_diff_body $ui_vpane.lower.diff
 #
 
 proc create_common_diff_popup {ctxm} {
+	$ctxm add command \
+		-label [mc "Next Change"] \
+		-command {diff_goto_change 1} \
+		-accelerator F3
+	$ctxm add command \
+		-label [mc "Previous Change"] \
+		-command {diff_goto_change -1} \
+		-accelerator Shift-F3
+	$ctxm add checkbutton \
+		-label [mc "Always Show Entire File"] \
+		-variable diff_whole_file_ui \
+		-command diff_whole_file_changed
+	$ctxm add separator
 	$ctxm add command \
 		-label [mc Refresh] \
 		-command reshow_diff
@@ -4202,6 +4240,7 @@ proc on_repo_tab_changed {} {
 	# Refresh commit state (HEAD/commit_type/branch) for the now-active repo.
 	catch {refresh_active_commit_state}
 	catch {set_repo_window_title}
+	catch {diff_map_update}
 	# repo_config is now the active repo's; rebuild the shared Tools menu so
 	# per-repo guitools (e.g. includeIf gitdir entries) match the active tab.
 	if {[info exists ::tools_menubar]} { tools_populate_all }
@@ -4526,6 +4565,8 @@ bind .   <$M1B-Key-KP_Subtract> {show_less_context;break}
 bind .   <$M1B-Key-equal> {show_more_context;break}
 bind .   <$M1B-Key-plus> {show_more_context;break}
 bind .   <$M1B-Key-KP_Add> {show_more_context;break}
+bind .   <Key-F3>       {diff_goto_change 1}
+bind .   <Shift-Key-F3> {diff_goto_change -1}
 bind .   <$M1B-Key-Return> do_commit
 bind .   <$M1B-Key-KP_Enter> do_commit
 
@@ -4533,6 +4574,8 @@ bind .   <Alt-Key-1> {focus_widget $::ui_workdir}
 bind .   <Alt-Key-2> {focus_widget $::ui_index}
 bind .   <Alt-Key-3> {focus $::ui_diff}
 bind .   <Alt-Key-4> {focus $::ui_comm}
+
+catch {diff_map_update}
 
 set_repo_window_title
 focus -force $ui_comm

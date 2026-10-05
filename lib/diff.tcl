@@ -29,6 +29,142 @@ proc clear_diff {} {
 
 	$ui_index tag remove in_diff 0.0 end
 	$ui_workdir tag remove in_diff 0.0 end
+
+	unset -nocomplain ::diff_change_state($ui_diff)
+	diff_map_update
+}
+
+# Text tags that mark changed lines, with the colour used in the overview map.
+proc diff_change_colors {} {
+	return {
+		d_+ #00a000 d_++ #00a000 d_+s #00a000 d_s+ #00a000
+		d_- #e00000 d_-- #e00000 d_-s #e00000 d_s- #e00000
+		d< orange d| orange d= orange d> orange
+	}
+}
+
+# Contiguous runs of changed lines in text widget $t as {first last+1} pairs.
+proc diff_change_blocks {t} {
+	set iv {}
+	foreach {tag _c} [diff_change_colors] {
+		foreach {a b} [$t tag ranges $tag] {
+			lappend iv [list [lindex [split $a .] 0] [lindex [split $b .] 0]]
+		}
+	}
+	set blocks {}
+	foreach i [lsort -integer -index 0 $iv] {
+		lassign $i s e
+		if {$blocks ne {} && $s <= [lindex $blocks end 1]} {
+			if {$e > [lindex $blocks end 1]} {
+				lset blocks end 1 $e
+			}
+		} else {
+			lappend blocks [list $s $e]
+		}
+	}
+	return $blocks
+}
+
+# Scroll the diff to the next ($dir > 0) or previous change block.
+proc diff_goto_change {dir {quiet 0}} {
+	global ui_diff diff_change_state
+	set margin 3
+
+	set blocks [diff_change_blocks $ui_diff]
+	if {$blocks eq {}} {
+		if {!$quiet} bell
+		return
+	}
+
+	set top [lindex [split [$ui_diff index @0,0] .] 0]
+	# Right after a jump, navigate relative to the block jumped to: yview
+	# clamps at the file ends so the top line alone can't identify it.
+	if {[info exists diff_change_state($ui_diff)]
+	 && [lindex $diff_change_state($ui_diff) 1] == $top} {
+		set ref [lindex $diff_change_state($ui_diff) 0]
+	} elseif {$top <= 1} {
+		set ref [expr {$dir > 0 ? 0 : 2}]
+	} else {
+		set ref [expr {$top + $margin}]
+	}
+
+	set target {}
+	if {$dir > 0} {
+		foreach b $blocks {
+			if {[lindex $b 0] > $ref} {
+				set target [lindex $b 0]
+				break
+			}
+		}
+	} else {
+		foreach b [lreverse $blocks] {
+			if {[lindex $b 0] < $ref} {
+				set target [lindex $b 0]
+				break
+			}
+		}
+	}
+	if {$target eq {}} {
+		bell
+		return
+	}
+
+	$ui_diff yview [expr {max($target - $margin, 1)}].0
+	update idletasks
+	set diff_change_state($ui_diff) \
+		[list $target [lindex [split [$ui_diff index @0,0] .] 0]]
+}
+
+proc diff_whole_file_changed {} {
+	global repo_config diff_whole_file_ui
+	set repo_config(gui.diffwholefile) \
+		[expr {$diff_whole_file_ui ? {true} : {false}}]
+	diff_map_update
+	reshow_diff
+}
+
+# Sync the whole-file menu state and show/hide the change map beside the
+# scrollbar of the active diff (shown only in whole-file mode).
+proc diff_map_update {} {
+	global ui_diff diff_whole_file_ui
+	set diff_whole_file_ui [is_config_true gui.diffwholefile]
+	if {![info exists ui_diff] || ![winfo exists $ui_diff]} return
+	set body [winfo parent $ui_diff]
+	set map $body.map
+	if {![winfo exists $map]} return
+	if {$diff_whole_file_ui} {
+		pack $map -side right -fill y -after $body.sby
+		diff_map_draw $map
+	} else {
+		pack forget $map
+		$map delete all
+	}
+}
+
+proc diff_map_draw {map} {
+	set t [winfo parent $map].t
+	$map delete all
+	set h [winfo height $map]
+	set w [winfo width $map]
+	set total [expr {[lindex [split [$t index end] .] 0] - 1}]
+	if {$h <= 1 || $total < 1} return
+	set scale [expr {double($h) / $total}]
+	foreach {tag color} [diff_change_colors] {
+		foreach {a b} [$t tag ranges $tag] {
+			set y1 [expr {([lindex [split $a .] 0] - 1) * $scale}]
+			set y2 [expr {([lindex [split $b .] 0] - 1) * $scale}]
+			if {$y2 - $y1 < 2} {set y2 [expr {$y1 + 2}]}
+			$map create rectangle 0 $y1 $w $y2 -fill $color -outline {}
+		}
+	}
+}
+
+proc diff_map_click {map y} {
+	set t [winfo parent $map].t
+	set h [winfo height $map]
+	if {$h <= 1} return
+	lassign [$t yview] first last
+	$t yview moveto [expr {double($y) / $h - ($last - $first) / 2.0}]
 }
 
 proc reshow_diff {{after {}}} {
@@ -317,7 +453,10 @@ proc start_show_diff {cont_info {add_opts {}}} {
 	lappend cmd -p
 	lappend cmd --color
 	set cmd [concat $cmd $repo_config(gui.diffopts)]
-	if {$repo_config(gui.diffcontext) >= 1} {
+	if {[is_config_true gui.diffwholefile]} {
+		# Large but overflow-safe in xdiff's 32-bit arithmetic.
+		lappend cmd -U999999999
+	} elseif {$repo_config(gui.diffcontext) >= 1} {
 		lappend cmd "-U$repo_config(gui.diffcontext)"
 	}
 	if {$w eq $ui_index} {
@@ -585,6 +724,11 @@ proc read_diff {fd conflict_size cont_info} {
 			$ui_diff yview moveto $scroll_pos
 		}
 		ui_ready
+
+		diff_map_update
+		if {$scroll_pos eq {} && [is_config_true gui.diffwholefile]} {
+			diff_goto_change 1 1
+		}
 
 		if {[$ui_diff index end] eq {2.0}} {
 			handle_empty_diff
