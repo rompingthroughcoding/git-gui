@@ -26,17 +26,17 @@ constructor new {i_w i_text args} {
 
 	set default_regexpsearch [is_config_true gui.search.regexp]
 	switch -- [get_config gui.search.case] {
-	no {
-		set default_casesensitive 0
+	yes {
+		set default_casesensitive 1
 		set smartcase 0
 	}
 	smart {
 		set default_casesensitive 0
 		set smartcase 1
 	}
-	yes -
+	no -
 	default {
-		set default_casesensitive 1
+		set default_casesensitive 0
 		set smartcase 0
 	}
 	}

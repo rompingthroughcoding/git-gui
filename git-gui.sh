@@ -3108,6 +3108,10 @@ if {[is_enabled multicommit] || [is_enabled singlecommit]} {
 		-command {diff_goto_change -1} \
 		-accelerator Shift-F3
 
+	.mbar.commit add command -label [mc "Find Text..."] \
+		-command diff_show_finder \
+		-accelerator $M1T-F
+
 	.mbar.commit add separator
 
 	if {![is_enabled nocommitmsg]} {
@@ -3836,9 +3840,15 @@ proc diff_yview {args} {
 	eval $ui_diff yview $args
 	$ui_diff_ln yview moveto [lindex [$ui_diff yview] 0]
 }
+	global ui_diff_finder
+	catch {::searchbar::scrolled $ui_diff_finder}
+}
+proc diff_show_finder {} {
+	global ui_diff_finder
+	catch {::searchbar::show $ui_diff_finder}
 
 proc build_diff_body {w} {
-	global ui_diff ui_diff_ln
+	global ui_diff ui_diff_ln ui_diff_finder
 	set ui_diff_ln $w.body.ln
 	set ui_diff    $w.body.t
 
@@ -3885,11 +3895,28 @@ proc build_diff_body {w} {
 	pack $w.body -side bottom -fill both -expand 1
 
 	foreach {n c} {0 black 1 red4 2 green4 3 yellow4 4 blue4 5 magenta4 6 cyan4 7 grey60} {
+	# The search bar is grid-managed; the zero-size spacer keeps this container
+	# collapsed while the bar is hidden.
+	ttk::frame $w.body.fc
+	grid columnconfigure $w.body.fc 0 -weight 1
+	grid [ttk::frame $w.body.fc.sp] -row 1 -column 0
+	set ui_diff_finder [::searchbar::new $w.body.fc.f $ui_diff -row 0 -column 0]
+	pack $w.body.fc -side bottom -fill x
 		$ui_diff tag configure clr4$n -background $c
 		$ui_diff tag configure clri4$n -foreground $c
 		$ui_diff tag configure clr3$n -foreground $c
 		$ui_diff tag configure clri3$n -background $c
 	}
+	set f $ui_diff_finder
+	set e [::searchbar::editor $f]
+	bind $ui_diff <Key-slash> [list ::searchbar::show $f]\;break
+	bind $ui_diff <$::M1B-Key-f> [list ::searchbar::show $f]\;break
+	bind $ui_diff <$::M1B-Key-F> [list ::searchbar::show $f]\;break
+	bind $ui_diff <Escape>    [list ::searchbar::hide $f]
+	bind $e <Escape>          [list ::searchbar::hide $f]\;break
+	bind $e <Key-F3>          [list ::searchbar::find_next $f]\;break
+	bind $e <Shift-Key-F3>    [list ::searchbar::find_prev $f]\;break
+
 	$ui_diff tag configure clr1 -font font_diffbold
 	$ui_diff tag configure clr4 -underline 1
 
@@ -3936,6 +3963,7 @@ pack $ui_vpane.lower.diff.header -side top -fill x
 build_diff_body $ui_vpane.lower.diff
 
 # -- Diff Body Context Menu
+	$ui_diff tag conf found -background yellow
 #
 
 proc create_common_diff_popup {ctxm} {
@@ -3953,6 +3981,10 @@ proc create_common_diff_popup {ctxm} {
 		-command diff_whole_file_changed
 	$ctxm add separator
 	$ctxm add command \
+	$ctxm add command \
+		-label [mc "Find Text..."] \
+		-command diff_show_finder \
+		-accelerator $::M1T-F
 		-label [mc Refresh] \
 		-command reshow_diff
 	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
@@ -4529,7 +4561,6 @@ bind $ui_diff <Key-j>         {catch {%W yview scroll  1 units};break}
 bind $ui_diff <Key-h>         {catch {%W xview scroll -1 units};break}
 bind $ui_diff <Key-l>         {catch {%W xview scroll  1 units};break}
 bind $ui_diff <Control-Key-b> {catch {%W yview scroll -1 pages};break}
-bind $ui_diff <Control-Key-f> {catch {%W yview scroll  1 pages};break}
 bind $ui_diff <Button-1>   {focus %W}
 
 if {[is_enabled branch]} {
@@ -4573,6 +4604,7 @@ bind .   <$M1B-Key-KP_Enter> do_commit
 bind .   <Alt-Key-1> {focus_widget $::ui_workdir}
 bind .   <Alt-Key-2> {focus_widget $::ui_index}
 bind .   <Alt-Key-3> {focus $::ui_diff}
+bind .   <Key-F7>       diff_show_finder
 bind .   <Alt-Key-4> {focus $::ui_comm}
 
 catch {diff_map_update}
