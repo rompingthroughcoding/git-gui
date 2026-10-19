@@ -205,6 +205,7 @@ proc handle_empty_diff {} {
 	global ui_diff
 
 	set path $current_diff_path
+	if {![info exists file_states($path)]} return
 	set s $file_states($path)
 	if {[lindex $s 0] ne {_M} || [has_textconv $path]} return
 
@@ -488,7 +489,9 @@ proc start_show_diff {cont_info {add_opts {}}} {
 		-blocking 0 \
 		-encoding [get_path_encoding $path] \
 		-translation lf
-	fileevent $fd readable [list read_diff $fd $conflict_size $cont_info]
+	fileevent $fd readable [list repoctx_dispatch [repoctx::current] \
+		[list read_diff $fd $conflict_size $cont_info] \
+		{set ::diff_active 0; unlock_index}]
 }
 
 proc parse_color_line {line} {

@@ -231,6 +231,14 @@ proc do_options {} {
 		}
 	}
 
+	incr optid
+	ttk::checkbutton $w.global.$optid \
+		-text [mc "Reopen Tabs From Last Session"] \
+		-variable global_config_new(gui.restoretabs) \
+		-onvalue true \
+		-offvalue false
+	pack $w.global.$optid -side top -anchor w
+
 	set all_dicts [linsert \
 		[spellcheck::available_langs] \
 		0 \
@@ -340,6 +348,7 @@ proc do_save_config {w} {
 	if {[catch {save_config} err]} {
 		error_popup [strcat [mc "Failed to completely save options:"] "\n\n$err"]
 	}
+	save_repo_tab_session
 	diff_map_update
 	reshow_diff
 	destroy $w
