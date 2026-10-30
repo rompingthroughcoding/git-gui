@@ -163,6 +163,7 @@ proc do_options {} {
 		{b gui.warndetachedcommit {mc "Warn before committing to a detached head"}}
 		{s gui.stageuntracked {mc "Staging of untracked files"} {list "yes" "no" "ask"}}
 		{b gui.displayuntracked {mc "Show untracked files"}}
+		{b gui.autosizefilelists {mc "Autosize file lists"}}
 		{i-1..99 gui.tabsize {mc "Tab spacing"}}
 		} {
 		set type [lindex $option 0]

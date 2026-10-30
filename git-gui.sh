@@ -873,6 +873,7 @@ set font_descs {
 }
 set default_config(gui.stageuntracked) ask
 set default_config(gui.displayuntracked) true
+set default_config(gui.autosizefilelists) true
 
 ######################################################################
 ##
@@ -1999,6 +2000,7 @@ proc display_file {path state} {
 		unset file_states($path)
 		catch {unset selected_paths($path)}
 	}
+	autosize_schedule [winfo parent [winfo parent $ui_index]]
 }
 
 proc display_all_files_helper {w path icon_name m} {
@@ -2068,6 +2070,104 @@ proc display_all_files {} {
 
 	$ui_index conf -state disabled
 	$ui_workdir conf -state disabled
+	autosize_schedule [winfo parent [winfo parent $ui_index]]
+}
+
+# -- File list autosizing
+#
+# Fits the Unstaged/Staged split to their contents and the file column to the
+# longest path, within limits. Dragging a sash pins it for the session;
+# double-clicking it returns to automatic sizing.
+set autosize_min_rows 3
+set autosize_min_share 0.2
+set autosize_min_width 160
+set autosize_max_width_share 0.4
+
+proc autosize_schedule {pw} {
+	global autosize_pending
+	if {[info exists autosize_pending($pw)]} return
+	set autosize_pending($pw) [after idle [list autosize_file_lists $pw]]
+}
+
+proc autosize_file_lists {pw} {
+	global autosize_pending autosize_pinned
+	unset -nocomplain autosize_pending($pw)
+	if {![winfo exists $pw] || ![winfo viewable $pw]} return
+	if {![is_config_true gui.autosizefilelists]} return
+	if {![info exists autosize_pinned($pw)]} {
+		autosize_split $pw
+	}
+	set hp [winfo parent $pw]
+	if {![info exists autosize_pinned($hp)]} {
+		autosize_column $hp $pw
+	}
+}
+
+proc autosize_split {pw} {
+	global autosize_min_rows autosize_min_share
+	set top $pw.workdir
+	set bot $pw.index
+	set avail [expr {[winfo height $top] + [winfo height $bot]}]
+	if {$avail < 20} return
+	foreach f [list $top $bot] {
+		set t $f.list
+		set rows [expr {int([$t index end-1c]) - 1}]
+		set px [$t count -update -ypixels 1.0 end-1c]
+		if {$rows > 0} {
+			set lh [expr {double($px) / $rows}]
+		} else {
+			set lh [font metrics [$t cget -font] -linespace]
+		}
+		set chrome [expr {[winfo height $f] - [winfo height $t]}]
+		set want($f) [expr {$chrome + $px + 4}]
+		set min($f) [expr {$chrome + $autosize_min_rows * $lh}]
+	}
+	set lo [expr {max($min($top), $avail * $autosize_min_share)}]
+	set hi [expr {min($avail - $min($bot), $avail * (1 - $autosize_min_share))}]
+	set h [expr {double($avail) * $want($top) / ($want($top) + $want($bot))}]
+	set h [expr {int(max($lo, min($hi, $h)))}]
+	if {abs($h - [$pw sashpos 0]) > 8} {
+		$pw sashpos 0 $h
+	}
+}
+
+proc autosize_column {hp pw} {
+	global autosize_min_width autosize_max_width_share
+	set total [winfo width $hp]
+	if {$total < 50} return
+	set want 0
+	set chrome 0
+	foreach t [list $pw.workdir.list $pw.index.list] {
+		set f [$t cget -font]
+		set icon 0
+		catch {set icon [expr {[image width [$t image cget 1.0 -image]] + 10}]}
+		foreach line [split [$t get 1.0 end-1c] \n] {
+			set want [expr {max($want, $icon + [font measure $f $line])}]
+		}
+		set chrome [expr {max($chrome,
+			[winfo width [winfo parent $t]] - [winfo width $t])}]
+	}
+	set w [expr {$want + $chrome + 8}]
+	set hi [expr {int($total * $autosize_max_width_share)}]
+	set w [expr {max($autosize_min_width, min($hi, $w))}]
+	if {abs($w - [$hp sashpos 0]) > 8} {
+		$hp sashpos 0 $w
+	}
+}
+
+proc autosize_press {w} {
+	set ::autosize_press($w) [$w sashpos 0]
+}
+proc autosize_release {w} {
+	if {[info exists ::autosize_press($w)]
+	    && [$w sashpos 0] != $::autosize_press($w)} {
+		set ::autosize_pinned($w) 1
+	}
+	unset -nocomplain ::autosize_press($w)
+}
+proc autosize_unpin {w pw} {
+	unset -nocomplain ::autosize_pinned($w)
+	autosize_schedule $pw
 }
 
 ######################################################################
@@ -3720,6 +3820,14 @@ proc build_file_lists {w} {
 }
 build_file_lists $ui_vpane_files
 
+foreach _pw [list $ui_vpane $ui_vpane_files] {
+	bind $_pw <ButtonPress-1>   {autosize_press %W}
+	bind $_pw <ButtonRelease-1> {autosize_release %W}
+	bind $_pw <Double-Button-1> [list autosize_unpin %W $ui_vpane_files]
+}
+unset _pw
+bind $ui_vpane_files <Configure> [list autosize_schedule $ui_vpane_files]
+
 proc set_selection_colors {w has_focus} {
 	foreach tag [list in_diff in_sel] {
 		$w tag conf $tag \
@@ -4469,6 +4577,7 @@ proc on_repo_tab_changed {} {
 	catch {refresh_active_commit_state}
 	catch {set_repo_window_title}
 	catch {diff_map_update}
+	catch {autosize_schedule [winfo parent [winfo parent $::ui_index]]}
 	# repo_config is now the active repo's; rebuild the shared Tools menu so
 	# per-repo guitools (e.g. includeIf gitdir entries) match the active tab.
 	if {[info exists ::tools_menubar]} { tools_populate_all }
