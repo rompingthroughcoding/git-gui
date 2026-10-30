@@ -4573,6 +4573,17 @@ proc repo_tab_show_worktrees {path output} {
 	focus $w.contents.output
 }
 
+proc repo_tab_right_click {x y} {
+	if {[catch {.repotabs index @$x,$y} idx]} return
+	set tab [lindex [.repotabs tabs] $idx]
+	if {$tab eq {}} return
+	repo_tab_list_worktrees $tab
+}
+bind .repotabs <Button-3> [list repo_tab_right_click %x %y]
+if {[is_MacOSX]} {
+	bind .repotabs <Control-Button-1> [list repo_tab_right_click %x %y]
+}
+
 # Ctrl-Tab / Ctrl-Shift-Tab cycle through the repository tabs (built-in ttk).
 ttk::notebook::enableTraversal .repotabs
 
