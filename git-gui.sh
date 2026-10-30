@@ -4477,6 +4477,102 @@ proc on_repo_tab_changed {} {
 bind .repotabs <<NotebookTabChanged>> on_repo_tab_changed
 bind .repotabs <Button-2> {close_repo_tab_at %x %y; break}
 
+proc repo_tab_list_worktrees {tab} {
+	global tab_path
+	if {![info exists tab_path($tab)]} return
+	set path $tab_path($tab)
+	if {[catch {set output [exec git -C $path worktree list]} err]} {
+		error_popup [strcat [mc "Unable to list worktrees"] ":\n\n" $err]
+		return
+	}
+	set rows {}
+	set path_width [string length [mc "Worktree Path"]]
+	set head_width [string length [mc "HEAD"]]
+	foreach line [split $output "\n"] {
+		if {$line eq {}} continue
+		if {[regexp {^(.+)\s+([[:xdigit:]]{7,64})(?:\s+(.*))?$} \
+			$line -> worktree head branch_state]} {
+			if {[regexp {^\[([^\]]+)\](.*)$} $branch_state -> branch suffix]} {
+				set branch_state "$branch$suffix"
+			}
+		} else {
+			set worktree $line
+			set head {}
+			set branch_state {}
+		}
+		set path_width [expr {max($path_width, [string length $worktree])}]
+		set head_width [expr {max($head_width, [string length $head])}]
+		lappend rows [list $worktree $head $branch_state]
+	}
+	set row_format "%-*s  %-*s  %s"
+	set header [format $row_format $path_width [mc "Worktree Path"] \
+		$head_width [mc "HEAD"] [mc "Branch / State"]]
+	set display_output [list $header [string repeat - [string length $header]]]
+	foreach row $rows {
+		lappend display_output [format $row_format $path_width \
+			[lindex $row 0] $head_width [lindex $row 1] [lindex $row 2]]
+	}
+	repo_tab_show_worktrees $path [join $display_output "\n"]
+}
+
+proc repo_tab_copy_worktrees_selection {widget} {
+	if {[catch {set selection [$widget get sel.first sel.last]}]} return
+	clipboard clear -displayof $widget
+	clipboard append -displayof $widget $selection
+}
+
+proc repo_tab_show_worktrees {path output} {
+	set w .repo_worktrees
+	if {[winfo exists $w]} { destroy $w }
+	toplevel $w
+	wm title $w [mc "Worktrees for %s" $path]
+	wm geometry $w 960x360
+	wm minsize $w 640 240
+
+	ttk::frame $w.contents
+	text $w.contents.output \
+		-background white \
+		-foreground black \
+		-borderwidth 1 \
+		-relief sunken \
+		-width 110 -height 14 \
+		-wrap none \
+		-exportselection 0 \
+		-font font_diff \
+		-xscrollcommand [list $w.contents.sbx set] \
+		-yscrollcommand [list $w.contents.sby set]
+	ttk::scrollbar $w.contents.sbx -orient horizontal \
+		-command [list $w.contents.output xview]
+	ttk::scrollbar $w.contents.sby -orient vertical \
+		-command [list $w.contents.output yview]
+	pack $w.contents.sby -side right -fill y
+	pack $w.contents.sbx -side bottom -fill x
+	pack $w.contents.output -side left -fill both -expand 1
+	$w.contents.output insert 1.0 $output
+	$w.contents.output configure -state disabled
+	bind $w.contents.output <<Copy>> \
+		"[list repo_tab_copy_worktrees_selection $w.contents.output]\nbreak"
+
+	ttk::frame $w.buttons
+	ttk::button $w.buttons.copy \
+		-text [mc "Copy Selection"] \
+		-command [list repo_tab_copy_worktrees_selection $w.contents.output]
+	ttk::button $w.buttons.close \
+		-text [mc "Close"] \
+		-command [list destroy $w]
+	pack $w.buttons.close -side right -padx 8 -pady 8
+	pack $w.buttons.copy -side right -padx 8 -pady 8
+	pack $w.contents -side top -fill both -expand 1 -padx 8 -pady 8
+	pack $w.buttons -side bottom -fill x
+
+	wm protocol $w WM_DELETE_WINDOW [list destroy $w]
+	bind $w <Escape> [list destroy $w]
+	wm transient $w .
+	wm deiconify $w
+	raise $w
+	focus $w.contents.output
+}
+
 # Ctrl-Tab / Ctrl-Shift-Tab cycle through the repository tabs (built-in ttk).
 ttk::notebook::enableTraversal .repotabs
 
