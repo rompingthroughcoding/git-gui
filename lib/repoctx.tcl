@@ -131,6 +131,7 @@ proc repoctx::use {id} {
 	variable contexts
 	variable current
 	if {![info exists contexts($id)]} { error "repoctx: unknown context $id" }
+	if {$current eq $id} { return $id }
 	if {$current ne {} && $current ne $id} { _save $current }
 	set current $id
 	_load $id

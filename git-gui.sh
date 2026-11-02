@@ -2717,9 +2717,12 @@ proc ui_do_rescan {} {
 
 proc do_rescan_all {} {
 	global rescan_all_active rescan_all_ids rescan_all_index rescan_all_buttons
-	global repo_tab_pending
+	global repo_tab_pending repo_tab_load_queue repo_tab_load_timer
 	if {$rescan_all_active} return
 	set rescan_all_active 1
+	if {$repo_tab_load_timer ne {}} { after cancel $repo_tab_load_timer }
+	set repo_tab_load_timer {}
+	set repo_tab_load_queue {}
 	foreach w $rescan_all_buttons {
 		if {[winfo exists $w]} { $w configure -state disabled }
 	}
@@ -3721,23 +3724,35 @@ if {![catch {
 # reserves its width so tabs never slide underneath it.
 ttk::button .rescan_all -text [mc "Rescan All"] -style Toolbutton \
 	-command do_rescan_all
-image create photo repo_tab_all_icon -width 22 -height 18
-ttk::button .group_all -image repo_tab_all_icon -style Toolbutton \
-	-command repo_tab_toggle_all
-bind .group_all <Enter> repo_tab_all_tooltip
-bind .group_all <Leave> repo_tab_hide_tooltip
-bind .group_all <ButtonPress> repo_tab_hide_tooltip
+foreach action {expand collapse} {
+	foreach {suffix color foreground} {normal #555555 white disabled #aaaaaa #dddddd} {
+		set icon repo_tab_${action}_$suffix
+		image create photo $icon -width 22 -height 18
+		$icon put $color -to 0 0 22 18
+		$icon put $foreground -to 5 8 17 10
+		if {$action eq "expand"} { $icon put $foreground -to 10 3 12 15 }
+	}
+	ttk::button .group_$action \
+		-image [list repo_tab_${action}_normal disabled repo_tab_${action}_disabled] \
+		-style Toolbutton -command [list repo_tab_set_all [expr {$action eq "collapse"}]]
+	bind .group_$action <Enter> [list repo_tab_all_tooltip $action]
+	bind .group_$action <Leave> repo_tab_hide_tooltip
+	bind .group_$action <ButtonPress> repo_tab_hide_tooltip
+}
+unset action suffix color foreground icon
 lappend rescan_all_buttons .rescan_all
 lappend disable_on_lock [list .rescan_all conf -state]
 set _rescan_all_w [expr {max([winfo reqwidth .rescan_all],
 	[font measure TkDefaultFont [.rescan_all cget -text]] + 24)}]
 ttk::style configure Repo.TNotebook \
-	-tabmargins [list 4 2 [expr {$_rescan_all_w + [winfo reqwidth .group_all] + 20}] 0]
+	-tabmargins [list 4 2 [expr {$_rescan_all_w + [winfo reqwidth .group_expand] + [winfo reqwidth .group_collapse] + 28}] 0]
 place .rescan_all -in .repotabs -relx 1.0 -x -4 -y 1 -anchor ne
-place .group_all -in .repotabs -relx 1.0 -x [expr {-$_rescan_all_w - 12}] -y 1 -anchor ne
+place .group_collapse -in .repotabs -relx 1.0 -x [expr {-$_rescan_all_w - 12}] -y 1 -anchor ne
+place .group_expand -in .repotabs -relx 1.0 -x [expr {-$_rescan_all_w - [winfo reqwidth .group_collapse] - 20}] -y 1 -anchor ne
 unset _rescan_all_w
 raise .rescan_all
-raise .group_all
+raise .group_expand
+raise .group_collapse
 
 set repo_tab_palette {
 	#4e79a7 #59a14f #e15759 #b07aa1 #f28e2b
@@ -3749,11 +3764,13 @@ array set repo_tab_image_state {}
 array set repo_tab_main {}
 array set repo_tab_discovery {}
 array set repo_tab_pending {}
+set repo_tab_load_queue {}
+set repo_tab_load_timer {}
 array set repo_tab_collapsed {}
 array set repo_tab_representative {}
 set repo_tab_hover {}
 set repo_tab_hover_timer {}
-set repo_tab_all_mode {}
+set repo_tab_all_states {}
 proc repo_tab_decorate {family} {
 	global repo_tab_palette repo_tab_swatch_seq repo_tab_images
 	if {[info exists repo_tab_images($family)]} { return $repo_tab_images($family) }
@@ -3769,7 +3786,7 @@ proc repo_tab_decorate {family} {
 
 proc repo_tab_refresh_groups {} {
 	global repo_tab_family repo_tab_images repo_tab_image_state repo_tab_collapsed repo_tab_representative
-	global repo_tab_all_mode
+	global repo_tab_all_states
 	set groups [dict create]
 	foreach tab [.repotabs tabs] {
 		if {![info exists repo_tab_family($tab)]} continue
@@ -3780,6 +3797,18 @@ proc repo_tab_refresh_groups {} {
 	set expandable 0
 	set expanded 0
 	dict for {family tabs} $groups {
+		set main_tabs {}
+		set worktree_tabs {}
+		foreach tab $tabs {
+			set path [dict get $repo_tab_family($tab) path]
+			set main [dict get $repo_tab_family($tab) repository]
+			if {$path eq $main || ([is_Windows] && [string equal -nocase $path $main])} {
+				lappend main_tabs $tab
+			} else {
+				lappend worktree_tabs $tab
+			}
+		}
+		set tabs [concat $main_tabs $worktree_tabs]
 		foreach tab $tabs {
 			if {[.repotabs index $tab] != $position} {
 				.repotabs insert $position $tab
@@ -3825,35 +3854,27 @@ proc repo_tab_refresh_groups {} {
 		}
 		set repo_tab_image_state($family) $image_state
 	}
-	set mode disabled
-	if {$expandable > 0} {
-		set mode [expr {$expanded > 0 ? "collapse" : "expand"}]
-	}
-	if {![info exists repo_tab_all_mode] || $mode ne $repo_tab_all_mode} {
-		set repo_tab_all_mode $mode
-		if {[winfo exists .group_all]} {
-			.group_all configure -state [expr {$mode eq "disabled" ? "disabled" : "normal"}]
-			repo_tab_all_icon put #555555 -to 0 0 22 18
-			repo_tab_all_icon put white -to 5 8 17 10
-			if {$mode eq "expand"} { repo_tab_all_icon put white -to 10 3 12 15 }
+	set states [list [expr {$expandable > $expanded ? "normal" : "disabled"}] \
+		[expr {$expanded > 0 ? "normal" : "disabled"}]]
+	if {![info exists repo_tab_all_states] || $states ne $repo_tab_all_states} {
+		set repo_tab_all_states $states
+		foreach action {expand collapse} state $states {
+			if {[winfo exists .group_$action]} { .group_$action configure -state $state }
 		}
 	}
 }
 
-proc repo_tab_toggle_all {} {
-	global repo_tab_collapsed repo_tab_all_mode
+proc repo_tab_set_all {collapsed} {
+	global repo_tab_collapsed
 	repo_tab_hide_tooltip
-	if {$repo_tab_all_mode eq "disabled"} return
-	set collapsed [expr {$repo_tab_all_mode eq "collapse"}]
 	foreach family [array names repo_tab_collapsed] { set repo_tab_collapsed($family) $collapsed }
 	repo_tab_refresh_groups
 }
 
-proc repo_tab_all_tooltip {} {
-	global repo_tab_hover_timer repo_tab_all_mode
+proc repo_tab_all_tooltip {action} {
+	global repo_tab_hover_timer
 	repo_tab_hide_tooltip
-	if {$repo_tab_all_mode eq "disabled"} return
-	if {$repo_tab_all_mode eq "expand"} {
+	if {$action eq "expand"} {
 		set text [mc "Expand All Repository Groups"]
 	} else {
 		set text [mc "Collapse All Repository Groups"]
@@ -4433,24 +4454,25 @@ build_diff_header $ui_vpane.lower.diff
 #
 # Multi-repo fork spike: the line-number + diff text widgets are built by a proc
 # under an arbitrary parent $w, pointing ui_diff/ui_diff_ln at it. The scroll
-# helpers derive their sibling widgets from those globals so they work for any
-# tab's diff body.
-proc diff_yscrollcmd {args} {
-	global ui_diff ui_diff_ln
-	set body [winfo parent $ui_diff]
+# helpers derive their sibling widgets from the owning diff widget.
+proc diff_yscrollcmd {diff finder args} {
+	if {![winfo exists $diff]} return
+	set body [winfo parent $diff]
+	if {![winfo exists $body.sby] || ![winfo exists $body.ln]} return
 	eval $body.sby set $args
-	$ui_diff_ln yview moveto [lindex $args 0]
-	global ui_diff_finder
-	catch {::searchbar::scrolled $ui_diff_finder}
+	$body.ln yview moveto [lindex $args 0]
+	catch {::searchbar::scrolled $finder}
 }
 proc diff_show_finder {} {
 	global ui_diff_finder
 	catch {::searchbar::show $ui_diff_finder}
 }
-proc diff_yview {args} {
-	global ui_diff ui_diff_ln
-	eval $ui_diff yview $args
-	$ui_diff_ln yview moveto [lindex [$ui_diff yview] 0]
+proc diff_yview {diff args} {
+	if {![winfo exists $diff]} return
+	set body [winfo parent $diff]
+	if {![winfo exists $body.ln]} return
+	eval $diff yview $args
+	$body.ln yview moveto [lindex [$diff yview] 0]
 }
 
 proc build_diff_body {w} {
@@ -4471,9 +4493,9 @@ proc build_diff_body {w} {
 		-padx 4 \
 		-cursor {}
 	bind $ui_diff_ln <MouseWheel> \
-		{diff_yview scroll [expr {-%D/120}] units; break}
-	bind $ui_diff_ln <Button-4> {diff_yview scroll -1 units; break}
-	bind $ui_diff_ln <Button-5> {diff_yview scroll  1 units; break}
+		"[list diff_yview $ui_diff] scroll \[expr {-%D/120}\] units; break"
+	bind $ui_diff_ln <Button-4> [list diff_yview $ui_diff scroll -1 units]\;break
+	bind $ui_diff_ln <Button-5> [list diff_yview $ui_diff scroll 1 units]\;break
 
 	ttext $ui_diff \
 		-borderwidth 0 \
@@ -4481,13 +4503,13 @@ proc build_diff_body {w} {
 		-font font_diff \
 		-takefocus 1 -highlightthickness 1 \
 		-xscrollcommand [list $w.body.sbx set] \
-		-yscrollcommand diff_yscrollcmd \
+		-yscrollcommand [list diff_yscrollcmd $ui_diff {}] \
 		-state disabled
 	catch {$ui_diff configure -tabstyle wordprocessor}
 	ttk::scrollbar $w.body.sbx -orient horizontal \
 		-command [list $ui_diff xview]
 	ttk::scrollbar $w.body.sby -orient vertical \
-		-command diff_yview
+		-command [list diff_yview $ui_diff]
 	# Change overview strip, packed beside the scrollbar in whole-file mode.
 	canvas $w.body.map -width 12 -highlightthickness 0 -borderwidth 0 \
 		-background #f0f0f0 -cursor {}
@@ -4501,6 +4523,7 @@ proc build_diff_body {w} {
 	grid columnconfigure $w.body.fc 0 -weight 1
 	grid [ttk::frame $w.body.fc.sp] -row 1 -column 0
 	set ui_diff_finder [::searchbar::new $w.body.fc.f $ui_diff -row 0 -column 0]
+	$ui_diff configure -yscrollcommand [list diff_yscrollcmd $ui_diff $ui_diff_finder]
 	pack $w.body.fc -side bottom -fill x
 	pack $w.body.sby -side right -fill y
 	pack $ui_diff_ln -side left -fill y
@@ -5177,7 +5200,84 @@ proc repo_tab_restore {path} {
 	repo_tab_add $tab $gitdir $path [file tail $path]
 }
 
-proc repo_tab_initialize {tab {scan 1}} {
+proc repo_tab_schedule_load {} {
+	global repo_tab_load_queue repo_tab_load_timer
+	if {$repo_tab_load_timer eq {} && [llength $repo_tab_load_queue] > 0} {
+		set repo_tab_load_timer [after 300 repo_tab_background_next]
+	}
+}
+
+proc repo_tab_queue_load {tab {priority 0}} {
+	global repo_tab_load_queue
+	set repo_tab_load_queue [lsearch -all -inline -not -exact $repo_tab_load_queue $tab]
+	if {$priority} {
+		set repo_tab_load_queue [linsert $repo_tab_load_queue 0 $tab]
+	} else {
+		lappend repo_tab_load_queue $tab
+	}
+	repo_tab_schedule_load
+}
+
+proc repo_tab_request_scan {tab} {
+	global repo_tab_load_queue rescan_active rescan_all_active index_lock_type
+	if {$rescan_active > 0 || $rescan_all_active || $index_lock_type ne "none"} {
+		repo_tab_queue_load $tab 1
+		return
+	}
+	set repo_tab_load_queue [lsearch -all -inline -not -exact $repo_tab_load_queue $tab]
+	do_rescan
+}
+
+proc repo_tab_background_next {} {
+	global repo_tab_load_queue repo_tab_load_timer repo_tab_pending tab_ctx
+	global rescan_active rescan_owner rescan_all_active index_lock_type
+	set repo_tab_load_timer {}
+	if {![winfo exists .repotabs]} { set repo_tab_load_queue {}; return }
+	if {$rescan_active > 0 && $rescan_owner ne {} &&
+		[lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		set rescan_active 0
+		set rescan_owner {}
+		catch {unlock_index}
+	}
+	if {$rescan_active > 0 || $rescan_all_active || $index_lock_type ne "none"} {
+		repo_tab_schedule_load
+		return
+	}
+	set selected [.repotabs select]
+	if {[lsearch -exact $repo_tab_load_queue $selected] >= 0} {
+		set repo_tab_load_queue [linsert \
+			[lsearch -all -inline -not -exact $repo_tab_load_queue $selected] 0 $selected]
+	}
+	while {[llength $repo_tab_load_queue] > 0} {
+		set tab [lindex $repo_tab_load_queue 0]
+		set repo_tab_load_queue [lrange $repo_tab_load_queue 1 end]
+		if {![winfo exists $tab]} continue
+		set previous [repoctx::current]
+		set previous_dir [pwd]
+		try {
+			if {[info exists repo_tab_pending($tab)] && ![repo_tab_initialize $tab 0 1]} continue
+			if {![info exists tab_ctx($tab)]} continue
+			repoctx::use $tab_ctx($tab)
+			cd [repoctx::field worktree]
+			if {$tab eq [.repotabs select]} {
+				do_rescan
+			} else {
+				rescan {}
+			}
+		} on error {message options} {
+			if {$rescan_active == 0} { catch {unlock_index} }
+		} finally {
+			if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+				repoctx::use $previous
+			}
+			catch {cd $previous_dir}
+		}
+		break
+	}
+	repo_tab_schedule_load
+}
+
+proc repo_tab_initialize {tab {scan 1} {quiet 0}} {
 	global repo_tab_pending tab_ctx disable_on_lock
 	if {![info exists repo_tab_pending($tab)]} { return [info exists tab_ctx($tab)] }
 	set path $repo_tab_pending($tab)
@@ -5205,7 +5305,7 @@ proc repo_tab_initialize {tab {scan 1}} {
 		set disable_on_lock $kept
 		set repo_tab_pending($tab) $path
 		if {!$failed} { set message [mc "Unable to open repository: %s" $path] }
-		error_popup $message
+		if {!$quiet} { error_popup $message }
 		return 0
 	}
 	return 1
@@ -5269,7 +5369,7 @@ proc open_repo_context {path {w {}} {scan 1}} {
 	# active context, so populate this repo's Tools menu and title explicitly.
 	if {[info exists ::tools_menubar]} { tools_populate_all }
 	catch {set_repo_window_title}
-	do_rescan
+	repo_tab_request_scan $w
 	save_repo_tab_session
 	return 1
 }
@@ -5373,7 +5473,7 @@ proc close_repo_tab_widget {w} {
 		catch {refresh_active_commit_state}
 		catch {set_repo_window_title}
 		if {[info exists ::tools_menubar]} { tools_populate_all }
-		if {$scan_survivor} { do_rescan }
+		if {$scan_survivor} { repo_tab_request_scan $stab }
 	}
 	repo_tab_refresh_groups
 	save_repo_tab_session
@@ -5676,8 +5776,12 @@ proc open_repos_sequentially {paths {select_path {}}} {
 		[lrange $paths 1 end] $select_path]
 }
 proc restore_repo_tabs {paths select_path} {
+	global repo_tab_pending
 	foreach path $paths { repo_tab_restore $path }
 	select_repo_tab_by_path $select_path
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_pending($tab)]} { repo_tab_queue_load $tab }
+	}
 	save_repo_tab_session
 }
 set _rest {}
