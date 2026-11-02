@@ -1109,10 +1109,8 @@ if {$subcommand eq {gui}} {
 		foreach _session_path $global_config(gui.sessionrepo) {
 			if {[catch {set _session_path [file normalize $_session_path]}]
 				|| ![file isdirectory $_session_path]
+				|| ![file exists [file join $_session_path .git]]
 				|| [lsearch -exact $_restore_repo_paths $_session_path] >= 0} continue
-			if {[catch {set _session_path [string trim \
-				[exec git -C $_session_path rev-parse --show-toplevel]]}]} continue
-			set _session_path [file normalize $_session_path]
 			if {[lsearch -exact $_restore_repo_paths $_session_path] < 0} {
 				lappend _restore_repo_paths $_session_path
 			}
@@ -1128,7 +1126,7 @@ if {$subcommand eq {gui}} {
 			if {![info exists _multi_repo_paths]
 				&& ![info exists env(GIT_DIR)]
 				&& ![info exists env(GIT_WORK_TREE)]} {
-				catch {cd [lindex $_restore_repo_paths 0]}
+				catch {cd $_restore_active_repo}
 			}
 		}
 	}
@@ -2719,13 +2717,22 @@ proc ui_do_rescan {} {
 
 proc do_rescan_all {} {
 	global rescan_all_active rescan_all_ids rescan_all_index rescan_all_buttons
+	global repo_tab_pending
 	if {$rescan_all_active} return
 	set rescan_all_active 1
-	set rescan_all_ids [repoctx::ids]
-	set rescan_all_index 0
 	foreach w $rescan_all_buttons {
 		if {[winfo exists $w]} { $w configure -state disabled }
 	}
+	set previous [repoctx::current]
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_pending($tab)]} { repo_tab_initialize $tab 0 }
+	}
+	if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+		repoctx::use $previous
+		catch {cd [repoctx::field worktree]}
+	}
+	set rescan_all_ids [repoctx::ids]
+	set rescan_all_index 0
 	rescan_all_next
 }
 
@@ -3714,38 +3721,334 @@ if {![catch {
 # reserves its width so tabs never slide underneath it.
 ttk::button .rescan_all -text [mc "Rescan All"] -style Toolbutton \
 	-command do_rescan_all
+image create photo repo_tab_all_icon -width 22 -height 18
+ttk::button .group_all -image repo_tab_all_icon -style Toolbutton \
+	-command repo_tab_toggle_all
+bind .group_all <Enter> repo_tab_all_tooltip
+bind .group_all <Leave> repo_tab_hide_tooltip
+bind .group_all <ButtonPress> repo_tab_hide_tooltip
 lappend rescan_all_buttons .rescan_all
 lappend disable_on_lock [list .rescan_all conf -state]
 set _rescan_all_w [expr {max([winfo reqwidth .rescan_all],
 	[font measure TkDefaultFont [.rescan_all cget -text]] + 24)}]
 ttk::style configure Repo.TNotebook \
-	-tabmargins [list 4 2 [expr {$_rescan_all_w + 8}] 0]
-unset _rescan_all_w
+	-tabmargins [list 4 2 [expr {$_rescan_all_w + [winfo reqwidth .group_all] + 20}] 0]
 place .rescan_all -in .repotabs -relx 1.0 -x -4 -y 1 -anchor ne
+place .group_all -in .repotabs -relx 1.0 -x [expr {-$_rescan_all_w - 12}] -y 1 -anchor ne
+unset _rescan_all_w
 raise .rescan_all
+raise .group_all
 
-# Give every tab a distinct color swatch so repos are easy to tell apart even
-# when their folder names collide. Colors cycle through a fixed palette; the
-# swatch is a bold color chip shown left of the repo name in the tab strip.
 set repo_tab_palette {
 	#4e79a7 #59a14f #e15759 #b07aa1 #f28e2b
 	#76b7b2 #edc948 #ff9da7 #9c755f #bab0ac}
 set repo_tab_swatch_seq 0
-# Return a solid color-chip image for tab $w, cycling through the palette.
-proc repo_tab_decorate {w} {
-	global repo_tab_palette repo_tab_swatch_seq
+array set repo_tab_family {}
+array set repo_tab_images {}
+array set repo_tab_image_state {}
+array set repo_tab_main {}
+array set repo_tab_discovery {}
+array set repo_tab_pending {}
+array set repo_tab_collapsed {}
+array set repo_tab_representative {}
+set repo_tab_hover {}
+set repo_tab_hover_timer {}
+set repo_tab_all_mode {}
+proc repo_tab_decorate {family} {
+	global repo_tab_palette repo_tab_swatch_seq repo_tab_images
+	if {[info exists repo_tab_images($family)]} { return $repo_tab_images($family) }
 	set color [lindex $repo_tab_palette \
 		[expr {$repo_tab_swatch_seq % [llength $repo_tab_palette]}]]
 	set n [incr repo_tab_swatch_seq]
 	set img repo_tab_swatch_$n
 	image create photo $img -width 22 -height 18
 	$img put $color -to 0 0 22 18
+	set repo_tab_images($family) $img
 	return $img
 }
 
+proc repo_tab_refresh_groups {} {
+	global repo_tab_family repo_tab_images repo_tab_image_state repo_tab_collapsed repo_tab_representative
+	global repo_tab_all_mode
+	set groups [dict create]
+	foreach tab [.repotabs tabs] {
+		if {![info exists repo_tab_family($tab)]} continue
+		dict lappend groups [dict get $repo_tab_family($tab) family] $tab
+	}
+	set selected [.repotabs select]
+	set position 0
+	set expandable 0
+	set expanded 0
+	dict for {family tabs} $groups {
+		foreach tab $tabs {
+			if {[.repotabs index $tab] != $position} {
+				.repotabs insert $position $tab
+			}
+			incr position
+		}
+		if {![info exists repo_tab_collapsed($family)]} { set repo_tab_collapsed($family) 0 }
+		if {[lsearch -exact $tabs $selected] >= 0} {
+			set repo_tab_representative($family) $selected
+		} elseif {![info exists repo_tab_representative($family)] ||
+			[lsearch -exact $tabs $repo_tab_representative($family)] < 0} {
+			set repo_tab_representative($family) [lindex $tabs 0]
+		}
+		set representative $repo_tab_representative($family)
+		set count [llength $tabs]
+		set collapsed [expr {$repo_tab_collapsed($family) && $count > 1}]
+		if {$count > 1} {
+			incr expandable
+			if {!$collapsed} { incr expanded }
+		}
+		foreach tab $tabs {
+			set label [dict get $repo_tab_family($tab) label]
+			if {$collapsed && $tab eq $representative} {
+				set label [file tail [dict get $repo_tab_family($tab) repository]]
+				append label " (+[expr {$count - 1}])"
+			}
+			if {[.repotabs tab $tab -text] ne $label} { .repotabs tab $tab -text $label }
+			if {!$collapsed || $tab eq $representative} {
+				if {[.repotabs tab $tab -state] ne "normal"} { .repotabs tab $tab -state normal }
+			} else {
+				if {[.repotabs tab $tab -state] ne "hidden"} { .repotabs hide $tab }
+			}
+		}
+		set image_state [list [expr {$count > 1}] $collapsed]
+		if {[info exists repo_tab_image_state($family)] &&
+			$repo_tab_image_state($family) eq $image_state} continue
+		set image $repo_tab_images($family)
+		set color [format "#%02x%02x%02x" {*}[$image get 0 0]]
+		$image put $color -to 0 0 22 18
+		if {$count > 1} {
+			$image put white -to 5 8 17 10
+			if {$collapsed} { $image put white -to 10 3 12 15 }
+		}
+		set repo_tab_image_state($family) $image_state
+	}
+	set mode disabled
+	if {$expandable > 0} {
+		set mode [expr {$expanded > 0 ? "collapse" : "expand"}]
+	}
+	if {![info exists repo_tab_all_mode] || $mode ne $repo_tab_all_mode} {
+		set repo_tab_all_mode $mode
+		if {[winfo exists .group_all]} {
+			.group_all configure -state [expr {$mode eq "disabled" ? "disabled" : "normal"}]
+			repo_tab_all_icon put #555555 -to 0 0 22 18
+			repo_tab_all_icon put white -to 5 8 17 10
+			if {$mode eq "expand"} { repo_tab_all_icon put white -to 10 3 12 15 }
+		}
+	}
+}
+
+proc repo_tab_toggle_all {} {
+	global repo_tab_collapsed repo_tab_all_mode
+	repo_tab_hide_tooltip
+	if {$repo_tab_all_mode eq "disabled"} return
+	set collapsed [expr {$repo_tab_all_mode eq "collapse"}]
+	foreach family [array names repo_tab_collapsed] { set repo_tab_collapsed($family) $collapsed }
+	repo_tab_refresh_groups
+}
+
+proc repo_tab_all_tooltip {} {
+	global repo_tab_hover_timer repo_tab_all_mode
+	repo_tab_hide_tooltip
+	if {$repo_tab_all_mode eq "disabled"} return
+	if {$repo_tab_all_mode eq "expand"} {
+		set text [mc "Expand All Repository Groups"]
+	} else {
+		set text [mc "Collapse All Repository Groups"]
+	}
+	set repo_tab_hover_timer [after 600 [list repo_tab_present_tooltip $text]]
+}
+
+proc repo_tab_toggle_at {x y} {
+	global repo_tab_family repo_tab_collapsed
+	if {[catch {.repotabs index @$x,$y} index]} { return 0 }
+	set tab [lindex [.repotabs tabs] $index]
+	if {![info exists repo_tab_family($tab)]} { return 0 }
+	if {[.repotabs identify $x $y] ne "label"} { return 0 }
+	set left $x
+	while {$left > 0 && [.repotabs identify [expr {$left - 1}] $y] eq "label"} {
+		if {[catch {.repotabs index @[expr {$left - 1}],$y} previous] || $previous != $index} break
+		incr left -1
+	}
+	if {$x - $left >= 22} { return 0 }
+	set family [dict get $repo_tab_family($tab) family]
+	set count 0
+	foreach member [.repotabs tabs] {
+		if {[info exists repo_tab_family($member)] &&
+			[dict get $repo_tab_family($member) family] eq $family} { incr count }
+	}
+	if {$count < 2} { return 0 }
+	set repo_tab_collapsed($family) [expr {!$repo_tab_collapsed($family)}]
+	repo_tab_refresh_groups
+	return 1
+}
+
+proc repo_tab_label {main worktree name} {
+	set same_path [expr {[file normalize $worktree] eq $main}]
+	if {[is_Windows]} { set same_path [string equal -nocase [file normalize $worktree] $main] }
+	set label [file tail $main]
+	if {!$same_path} {
+		if {[string first "$label-" $name] == 0} {
+			set name [string range $name [expr {[string length $label] + 1}] end]
+		}
+		set label $name
+	}
+	return $label
+}
+
+proc repo_tab_discover {family gitdir} {
+	global repo_tab_family repo_tab_main repo_tab_discovery
+	unset -nocomplain repo_tab_discovery($family)
+	set members {}
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_family($tab)] &&
+			[dict get $repo_tab_family($tab) family] eq $family} { lappend members $tab }
+	}
+	if {[llength $members] == 0} return
+	if {[catch {set listing [git --git-dir=$gitdir worktree list --porcelain -z]}]} return
+	set first [lindex [split $listing "\0"] 0]
+	if {![string match "worktree *" $first]} return
+	set main [file normalize [string range $first 9 end]]
+	set repo_tab_main($family) $main
+	foreach tab $members {
+		set metadata $repo_tab_family($tab)
+		dict set metadata repository $main
+		dict set metadata label [repo_tab_label $main [dict get $metadata path] [dict get $metadata name]]
+		set repo_tab_family($tab) $metadata
+		if {[winfo exists $tab.repository]} {
+			set path $main
+			if {[is_Windows]} { set path [file nativename $path] }
+			$tab.repository configure -text [mc "Repository: %s" $path]
+		}
+	}
+	repo_tab_refresh_groups
+}
+
+proc repo_tab_add {widget gitdir worktree name} {
+	global repo_tab_family repo_tab_main repo_tab_discovery
+	set common $gitdir
+	if {[file exists [file join $gitdir commondir]]} {
+		if {[catch {
+			set common_file [open [file join $gitdir commondir] r]
+			try {
+				set common [file normalize [file join $gitdir [string trim [read $common_file]]]]
+			} finally {
+				close $common_file
+			}
+		}]} { set common $gitdir }
+	}
+	set family $common
+	if {[is_Windows]} { set family [string tolower $family] }
+	set main $worktree
+	if {[info exists repo_tab_main($family)]} {
+		set main $repo_tab_main($family)
+	} elseif {[file tail $common] eq ".git"} {
+		set main [file dirname $common]
+	}
+	set label [repo_tab_label $main $worktree $name]
+	set neighbor {}
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_family($tab)] &&
+			[dict get $repo_tab_family($tab) family] eq $family} {
+			set neighbor $tab
+		}
+	}
+	set repo_tab_family($widget) [dict create family $family gitdir $gitdir path $worktree label $label repository $main name $name]
+	.repotabs add $widget -text $label -image [repo_tab_decorate $family] -compound left
+	if {$neighbor ne {}} {
+		.repotabs insert [expr {[.repotabs index $neighbor] + 1}] $widget
+	}
+	repo_tab_refresh_groups
+	if {![info exists repo_tab_main($family)] && ![info exists repo_tab_discovery($family)]} {
+		set repo_tab_discovery($family) [after idle [list after 0 [list repo_tab_discover $family $gitdir]]]
+	}
+}
+
+proc repo_tab_hide_tooltip {} {
+	global repo_tab_hover repo_tab_hover_timer
+	if {$repo_tab_hover_timer ne {}} { after cancel $repo_tab_hover_timer }
+	set repo_tab_hover_timer {}
+	set repo_tab_hover {}
+	if {[winfo exists .repo_tab_tooltip]} { wm withdraw .repo_tab_tooltip }
+}
+
+proc repo_tab_present_tooltip {text} {
+	set tooltip .repo_tab_tooltip
+	if {![winfo exists $tooltip]} {
+		toplevel $tooltip -borderwidth 1
+		wm withdraw $tooltip
+		wm overrideredirect $tooltip 1
+		wm transient $tooltip .
+		catch {wm attributes $tooltip -type tooltip}
+		ttk::label $tooltip.text -padding 6
+		pack $tooltip.text
+	}
+	$tooltip.text configure -text $text
+	update idletasks
+	set x [expr {min([winfo pointerx .] + 12,
+		[winfo screenwidth .] - [winfo reqwidth $tooltip])}]
+	set y [expr {min([winfo pointery .] + 20,
+		[winfo screenheight .] - [winfo reqheight $tooltip])}]
+	wm geometry $tooltip +[expr {max(0, $x)}]+[expr {max(0, $y)}]
+	wm deiconify $tooltip
+}
+
+proc repo_tab_show_tooltip {tab} {
+	global repo_tab_family repo_tab_hover_timer
+	set repo_tab_hover_timer {}
+	if {![winfo exists $tab] || ![info exists repo_tab_family($tab)]} return
+	set metadata $repo_tab_family($tab)
+	set gitdir [dict get $metadata gitdir]
+	set branch {}
+	if {![catch {set head_file [open [file join $gitdir HEAD] r]}]} {
+		try {
+			set head [string trim [read $head_file 4096]]
+			if {![regexp {^ref: refs/heads/(.+)$} $head -> branch]} {
+				if {[regexp {^[[:xdigit:]]+$} $head]} { set branch [string range $head 0 6] }
+			}
+		} finally {
+			close $head_file
+		}
+	}
+	set path [dict get $metadata path]
+	if {[is_Windows]} { set path [file nativename $path] }
+	set text "$path\n$branch"
+	set family [dict get $metadata family]
+	set count 0
+	foreach member [.repotabs tabs] {
+		if {[info exists repo_tab_family($member)] &&
+			[dict get $repo_tab_family($member) family] eq $family} { incr count }
+	}
+	if {$count > 1} {
+		if {$::repo_tab_collapsed($family)} {
+			append text "\n" [mc "Expand repository group"]
+		} else {
+			append text "\n" [mc "Collapse repository group"]
+		}
+	}
+	repo_tab_present_tooltip $text
+}
+
+proc repo_tab_motion {x y} {
+	global repo_tab_hover repo_tab_hover_timer
+	if {[catch {.repotabs index @$x,$y} index]} {
+		repo_tab_hide_tooltip
+		return
+	}
+	set tab [lindex [.repotabs tabs] $index]
+	if {$tab eq $repo_tab_hover} return
+	repo_tab_hide_tooltip
+	set repo_tab_hover $tab
+	set repo_tab_hover_timer [after 600 [list repo_tab_show_tooltip $tab]]
+}
+bind .repotabs <Motion> {repo_tab_motion %x %y}
+bind .repotabs <Leave> repo_tab_hide_tooltip
+bind .repotabs <ButtonPress> repo_tab_hide_tooltip
+
 ttk::frame .repotabs.repo0
-.repotabs add .repotabs.repo0 -text $_reponame \
-	-image [repo_tab_decorate .repotabs.repo0] -compound left
+repo_tab_add .repotabs.repo0 $_gitdir $_gitworktree $_reponame
 
 # Build one repository's entire UI under tab frame $w. Every panel sets its ui_*
 # path globals relative to $w, so switching repoctx to a repo repoints all the
@@ -3753,6 +4056,10 @@ ttk::frame .repotabs.repo0
 # new tabs; inner proc defs simply redefine the global helpers harmlessly.
 proc build_repo_ui {w} {
 	global ui_w ui_vpane ui_vpane_files ui_index ui_workdir ui_diff
+	set repository [dict get $::repo_tab_family($w) repository]
+	if {[is_Windows]} { set repository [file nativename $repository] }
+	ttk::label $w.repository -text [mc "Repository: %s" $repository] -anchor w
+	pack $w.repository -side top -fill x -padx 5 -pady 2
 	set ui_w $w
 	set ui_vpane $w.vpane
 	set ui_vpane_files $ui_vpane.files
@@ -4564,8 +4871,20 @@ proc set_repo_window_title {} {
 }
 
 proc on_repo_tab_changed {} {
-	global tab_ctx
+	global tab_ctx repo_tab_pending
+	repo_tab_refresh_groups
 	set w [.repotabs select]
+	if {$w ne {} && [info exists repo_tab_pending($w)]} {
+		if {![repo_tab_initialize $w]} {
+			foreach tab [.repotabs tabs] {
+				if {[info exists tab_ctx($tab)] && $tab_ctx($tab) eq [repoctx::current]} {
+					.repotabs select $tab
+					break
+				}
+			}
+		}
+		return
+	}
 	if {$w eq {} || ![info exists tab_ctx($w)]} return
 	if {[repoctx::current] eq $tab_ctx($w)} {
 		save_repo_tab_session
@@ -4609,6 +4928,7 @@ proc repo_tab_list_worktrees {tab} {
 			set head {}
 			set branch_state {}
 		}
+		if {[is_Windows]} { set worktree [file nativename $worktree] }
 		set path_width [expr {max($path_width, [string length $worktree])}]
 		set head_width [expr {max($head_width, [string length $head])}]
 		lappend rows [list $worktree $head $branch_state]
@@ -4621,7 +4941,7 @@ proc repo_tab_list_worktrees {tab} {
 		lappend display_output [format $row_format $path_width \
 			[lindex $row 0] $head_width [lindex $row 1] [lindex $row 2]]
 	}
-	repo_tab_show_worktrees $path [join $display_output "\n"]
+	repo_tab_show_worktrees $path [join $display_output "\n"] $rows
 }
 
 proc repo_tab_copy_worktrees_selection {widget} {
@@ -4630,10 +4950,43 @@ proc repo_tab_copy_worktrees_selection {widget} {
 	clipboard append -displayof $widget $selection
 }
 
-proc repo_tab_show_worktrees {path output} {
+proc repo_tab_select_worktree {widget x y rows button} {
+	set index [$widget index @$x,$y]
+	set row [expr {[lindex [split $index .] 0] - 3}]
+	$widget mark set worktree_row $index
+	if {$row >= 0 && $row < [llength $rows]} {
+		$button configure -state normal
+	} else {
+		$button configure -state disabled
+	}
+}
+
+proc repo_tab_open_worktree {widget rows} {
+	global tab_path
+	set row [expr {[lindex [split [$widget index worktree_row] .] 0] - 3}]
+	if {$row < 0 || $row >= [llength $rows]} return
+	set path [lindex [lindex $rows $row] 0]
+	if {![file isdirectory $path]} {
+		error_popup [mc "Worktree directory does not exist: %s" $path]
+		return
+	}
+	set path [file normalize $path]
+	foreach tab [.repotabs tabs] {
+		if {![info exists tab_path($tab)]} continue
+		if {$tab_path($tab) eq $path ||
+			([is_Windows] && [string equal -nocase $tab_path($tab) $path])} {
+			.repotabs select $tab
+			return
+		}
+	}
+	open_repo_context $path
+}
+
+proc repo_tab_show_worktrees {path output rows} {
 	set w .repo_worktrees
 	if {[winfo exists $w]} { destroy $w }
 	toplevel $w
+	if {[is_Windows]} { set path [file nativename $path] }
 	wm title $w [mc "Worktrees for %s" $path]
 	wm geometry $w 960x360
 	wm minsize $w 640 240
@@ -4663,6 +5016,15 @@ proc repo_tab_show_worktrees {path output} {
 		"[list repo_tab_copy_worktrees_selection $w.contents.output]\nbreak"
 
 	ttk::frame $w.buttons
+	ttk::button $w.buttons.open \
+		-text [mc "Open Worktree"] \
+		-state disabled \
+		-command [list repo_tab_open_worktree $w.contents.output $rows]
+	ttk::button $w.buttons.browse \
+		-text [mc "Open Repository..."] \
+		-command do_open_repo_tab
+	bind $w.contents.output <ButtonRelease-1> \
+		[list repo_tab_select_worktree %W %x %y $rows $w.buttons.open]
 	ttk::button $w.buttons.copy \
 		-text [mc "Copy Selection"] \
 		-command [list repo_tab_copy_worktrees_selection $w.contents.output]
@@ -4671,6 +5033,8 @@ proc repo_tab_show_worktrees {path output} {
 		-command [list destroy $w]
 	pack $w.buttons.close -side right -padx 8 -pady 8
 	pack $w.buttons.copy -side right -padx 8 -pady 8
+	pack $w.buttons.open -side left -padx 8 -pady 8
+	pack $w.buttons.browse -side left -padx 8 -pady 8
 	pack $w.contents -side top -fill both -expand 1 -padx 8 -pady 8
 	pack $w.buttons -side bottom -fill x
 
@@ -4683,6 +5047,7 @@ proc repo_tab_show_worktrees {path output} {
 }
 
 proc repo_tab_right_click {x y} {
+	repo_tab_hide_tooltip
 	if {[catch {.repotabs index @$x,$y} idx]} return
 	set tab [lindex [.repotabs tabs] $idx]
 	if {$tab eq {}} return
@@ -4702,7 +5067,9 @@ ttk::notebook::enableTraversal .repotabs
 set _repo_tab_drag {}
 proc repo_tab_drag_press {x y} {
 	global _repo_tab_drag
+	repo_tab_hide_tooltip
 	set _repo_tab_drag {}
+	if {[repo_tab_toggle_at $x $y]} { return -code break }
 	catch {set _repo_tab_drag [.repotabs index @$x,$y]}
 }
 proc repo_tab_drag_motion {x y} {
@@ -4716,6 +5083,7 @@ proc repo_tab_drag_motion {x y} {
 proc repo_tab_drag_release {} {
 	global _repo_tab_drag
 	set _repo_tab_drag {}
+	repo_tab_refresh_groups
 	save_repo_tab_session
 }
 bind .repotabs <ButtonPress-1>   {repo_tab_drag_press %x %y}
@@ -4782,29 +5150,102 @@ proc select_repo_tab_by_path {path} {
 
 # Open another repository in a new tab: discover its git dirs, register a fresh
 # repoctx, build its UI under a new tab, load its config, and rescan.
-proc open_repo_context {path} {
+proc repo_tab_restore {path} {
+	global tab_path repo_tab_pending
+	set path [file normalize $path]
+	foreach tab [.repotabs tabs] {
+		if {[info exists tab_path($tab)] &&
+			([string equal $tab_path($tab) $path] ||
+			([is_Windows] && [string equal -nocase $tab_path($tab) $path]))} { return }
+	}
+	set gitdir [file join $path .git]
+	if {[file isfile $gitdir]} {
+		if {[catch {
+			set gitfile [open $gitdir r]
+			try {
+				set contents [string trim [read $gitfile 4096]]
+			} finally { close $gitfile }
+			if {![regexp {^gitdir: (.+)$} $contents -> target]} { error "Invalid gitdir file" }
+			set gitdir [file normalize [file join $path $target]]
+		}]} return
+	}
+	if {![file isdirectory $gitdir]} return
+	set tab .repotabs.repo[incr ::_repo_tab_seq]
+	ttk::frame $tab
+	set tab_path($tab) $path
+	set repo_tab_pending($tab) $path
+	repo_tab_add $tab $gitdir $path [file tail $path]
+}
+
+proc repo_tab_initialize {tab {scan 1}} {
+	global repo_tab_pending tab_ctx disable_on_lock
+	if {![info exists repo_tab_pending($tab)]} { return [info exists tab_ctx($tab)] }
+	set path $repo_tab_pending($tab)
+	set previous [repoctx::current]
+	set previous_ids [repoctx::ids]
+	set previous_dir [pwd]
+	unset repo_tab_pending($tab)
+	set initialized 0
+	set failed [catch {set initialized [open_repo_context $path $tab $scan]} message]
+	if {$failed || !$initialized} {
+		set failed_context [repoctx::current]
+		if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+			repoctx::reload $previous
+		}
+		if {$failed_context ne {} && [lsearch -exact $previous_ids $failed_context] < 0} {
+			repoctx::forget $failed_context
+		}
+		catch {cd $previous_dir}
+		foreach child [winfo children $tab] { destroy $child }
+		unset -nocomplain tab_ctx($tab)
+		set kept {}
+		foreach entry $disable_on_lock {
+			if {![string match $tab.* [lindex $entry 0]]} { lappend kept $entry }
+		}
+		set disable_on_lock $kept
+		set repo_tab_pending($tab) $path
+		if {!$failed} { set message [mc "Unable to open repository: %s" $path] }
+		error_popup $message
+		return 0
+	}
+	return 1
+}
+
+proc open_repo_context {path {w {}} {scan 1}} {
 	global tab_ctx tab_path env
 	set save [pwd]
 	# git-gui pins the active repo via GIT_DIR/GIT_WORK_TREE env vars, which
 	# override cwd. Clear them so discovery honors the chosen directory; the
 	# fresh context's _load will set them to the new repo.
-	set restore_env [list]
-	if {[info exists env(GIT_DIR)]}       { set restore_env $env(GIT_DIR) ; unset env(GIT_DIR) }
-	if {[info exists env(GIT_WORK_TREE)]} { unset env(GIT_WORK_TREE) }
-	if {[catch {cd $path}]} { return }
-	if {[catch {set gd [git rev-parse --git-dir]}]} { cd $save ; return }
-	set gd [file normalize $gd]
-	set wt {}
-	catch {set wt [string trim [git rev-parse --show-toplevel]]}
-	if {$wt eq {}} { set wt [file normalize $path] }
-	set pfx {}
-	catch {set pfx [string trim [git rev-parse --show-prefix]]}
+	set restore_env [dict create]
+	foreach variable {GIT_DIR GIT_WORK_TREE} {
+		if {[info exists env($variable)]} {
+			dict set restore_env $variable $env($variable)
+			unset env($variable)
+		}
+	}
+	try {
+		if {[catch {cd $path}]} { return 0 }
+		if {[catch {set gd [git rev-parse --git-dir]}]} { return 0 }
+		set gd [file normalize $gd]
+		set wt {}
+		catch {set wt [string trim [git rev-parse --show-toplevel]]}
+		if {$wt eq {}} { set wt [file normalize $path] }
+		set pfx {}
+		catch {set pfx [string trim [git rev-parse --show-prefix]]}
+	} finally {
+		cd $save
+		foreach variable {GIT_DIR GIT_WORK_TREE} { unset -nocomplain env($variable) }
+		dict for {variable value} $restore_env { set env($variable) $value }
+	}
 	set rn [file tail $wt]
 	_record_recent_repo $wt
 
-	set w .repotabs.repo[incr ::_repo_tab_seq]
-	ttk::frame $w
-	.repotabs add $w -text $rn -image [repo_tab_decorate $w] -compound left
+	if {$w eq {}} {
+		set w .repotabs.repo[incr ::_repo_tab_seq]
+		ttk::frame $w
+		repo_tab_add $w $gd $wt $rn
+	}
 
 	repoctx::open_context $gd $wt $rn $pfx
 	cd $wt
@@ -4822,6 +5263,7 @@ proc open_repo_context {path} {
 	set tab_ctx($w) [repoctx::current]
 	set tab_path($w) [file normalize $wt]
 
+	if {!$scan} { return 1 }
 	.repotabs select $w
 	# The tab-changed handler short-circuits when the new tab is already the
 	# active context, so populate this repo's Tools menu and title explicitly.
@@ -4829,6 +5271,7 @@ proc open_repo_context {path} {
 	catch {set_repo_window_title}
 	do_rescan
 	save_repo_tab_session
+	return 1
 }
 
 proc do_open_repo_tab {} {
@@ -4874,12 +5317,14 @@ proc populate_recent_tab_menu {} {
 
 # Close the active repository tab (quit if it is the last one).
 proc close_repo_tab_widget {w} {
-	global tab_ctx
+	global tab_ctx repo_tab_family repo_tab_pending tab_path
+	repo_tab_hide_tooltip
 	if {$w eq {}} return
 	if {[llength [.repotabs tabs]] <= 1} { do_quit ; return }
 	set ctx {}
 	catch {set ctx $tab_ctx($w)}
 	set closing_active [expr {[.repotabs select] eq $w}]
+	set scan_survivor 0
 
 	if {$closing_active} {
 		# Pick the tab to activate after this closes (next one, else previous).
@@ -4891,6 +5336,11 @@ proc close_repo_tab_widget {w} {
 		} else {
 			set stab [lindex $rest end]
 		}
+		if {[info exists repo_tab_pending($stab)]} {
+			if {![repo_tab_initialize $stab 0]} return
+			set scan_survivor 1
+		}
+		.repotabs tab $stab -state normal
 		# Activate the survivor's context BEFORE destroying this tab. The
 		# closing repo's widgets are about to vanish, so load the survivor
 		# without saving the outgoing (now-invalid) globals back into any
@@ -4902,6 +5352,8 @@ proc close_repo_tab_widget {w} {
 	}
 
 	unset -nocomplain tab_ctx($w)
+	unset -nocomplain repo_tab_family($w)
+	unset -nocomplain repo_tab_pending($w) tab_path($w)
 	.repotabs forget $w
 	destroy $w
 	if {$ctx ne {}} { repoctx::forget $ctx }
@@ -4921,7 +5373,9 @@ proc close_repo_tab_widget {w} {
 		catch {refresh_active_commit_state}
 		catch {set_repo_window_title}
 		if {[info exists ::tools_menubar]} { tools_populate_all }
+		if {$scan_survivor} { do_rescan }
 	}
+	repo_tab_refresh_groups
 	save_repo_tab_session
 }
 
@@ -5221,24 +5675,26 @@ proc open_repos_sequentially {paths {select_path {}}} {
 	after 100 [list open_repos_sequentially \
 		[lrange $paths 1 end] $select_path]
 }
+proc restore_repo_tabs {paths select_path} {
+	foreach path $paths { repo_tab_restore $path }
+	select_repo_tab_by_path $select_path
+	save_repo_tab_session
+}
 set _rest {}
 if {[info exists _multi_repo_paths]} {
 	set _rest [lrange $_multi_repo_paths 1 end]
 	set _restore_active_repo {}
 }
 set _startup_repo_path [file normalize $_gitworktree]
+set _session_rest {}
 foreach _session_path $_restore_repo_paths {
 	if {$_session_path eq $_startup_repo_path
 		|| [lsearch -exact $_rest $_session_path] >= 0} continue
-	lappend _rest $_session_path
+	lappend _session_rest $_session_path
 }
+after idle [list restore_repo_tabs $_session_rest $_restore_active_repo]
 if {[llength $_rest] > 0} {
 	after idle [list open_repos_sequentially $_rest $_restore_active_repo]
-} elseif {$_restore_active_repo ne {}} {
-	after idle [list select_repo_tab_by_path $_restore_active_repo]
-	after idle save_repo_tab_session
-} else {
-	after idle save_repo_tab_session
 }
 
 # Local variables:
