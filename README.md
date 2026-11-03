@@ -11,6 +11,21 @@ page](https://git-scm.com/docs/git-gui).
 Git GUI was initially written by Shawn O. Pearce, and is distributed with the
 standard Git installation.
 
+## File-list autosizing
+
+The Unstaged and Staged file lists automatically share the left column
+according to their contents. The column fits the longest displayed path,
+with a minimum width of 300 pixels or 20% of the available window width,
+whichever is larger, and a maximum of 40%. In narrow windows, the 40%
+maximum takes precedence so the diff area retains its space.
+
+Dragging a divider pins its position for that repository tab for the
+session; double-clicking it resumes autosizing. Disable **Autosize file
+lists** in Options (`gui.autosizefilelists`) to use fixed dividers.
+
+The status bar shows a native progress indicator only while operations are
+active; no empty indicator is displayed when idle.
+
 # Building and installing
 
 You need to have the following dependencies installed before you begin:

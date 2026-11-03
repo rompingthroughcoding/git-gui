@@ -18,8 +18,8 @@ field allow_multiple ; # configured at construction
 
 field w         ; # our own window path
 field w_l       ; # text widget we draw messages into
-field w_c       ; # canvas we draw a progress bar into
-field c_pack    ; # script to pack the canvas with
+field w_c       ; # progress bar widget
+field c_pack    ; # script to pack the progress bar with
 
 field baseline_text   ; # text to show if there are no operations
 field status_bar_text ; # combined text for all operations
@@ -63,8 +63,8 @@ constructor new {path} {
 }
 
 method _oneline_pack {} {
-	$w_c conf -width 100
-	pack $w_c -side right
+	$w_c conf -length 100
+	pack $w_c -side right -padx 6 -pady 2
 }
 
 constructor two_line {path} {
@@ -85,28 +85,21 @@ constructor two_line {path} {
 		-anchor w \
 		-justify left
 	pack $w_l -anchor w -fill x
-	set c_pack [list pack $w_c -fill x]
+	set c_pack [list pack $w_c -fill x -padx 6 -pady 2]
 
 	bind $w <Destroy> [cb _delete %W]
 	return $this
 }
 
-method ensure_canvas {} {
-	if {[winfo exists $w_c]} {
-		$w_c coords bar 0 0 0 20
-	} else {
-		canvas $w_c \
-			-height [expr {int([winfo reqheight $w_l] * 0.6)}] \
-			-borderwidth 1 \
-			-relief groove \
-			-highlightt 0
-		$w_c create rectangle 0 0 0 20 -tags bar -fill navy
+method ensure_progress {} {
+	if {![winfo exists $w_c]} {
+		ttk::progressbar $w_c -orient horizontal -mode determinate \
+			-maximum 100
 		eval $c_pack
 	}
 }
 
 method show {msg} {
-	$this ensure_canvas
 	set baseline_text $msg
 	$this refresh
 }
@@ -117,8 +110,6 @@ method start {msg {uds {}}} {
 	if {!$allow_multiple && [llength $operations]} {
 		return [lindex $operations 0]
 	}
-
-	$this ensure_canvas
 
 	set operation [status_bar_operation::new $this $msg $uds]
 
@@ -152,13 +143,11 @@ method refresh {} {
 
 	set status_bar_text $new_text
 
-	if {[winfo exists $w_c]} {
-		set pixel_width 0
-		if {$have > 0} {
-			set pixel_width [expr {[winfo width $w_c] * $have / $total}]
-		}
-
-		$w_c coords bar 0 0 $pixel_width 20
+	if {[llength $operations]} {
+		$this ensure_progress
+		$w_c conf -value [expr {100.0 * $have / $total}]
+	} elseif {[winfo exists $w_c]} {
+		destroy $w_c
 	}
 }
 
@@ -173,7 +162,6 @@ method stop {operation stop_msg} {
 		if {[llength $operations] == 0} {
 			set completed_operation_count 0
 
-			destroy $w_c
 			if {$stop_msg ne {}} {
 				set baseline_text $stop_msg
 			}
@@ -187,6 +175,7 @@ method stop_all {{stop_msg {}}} {
 	# This makes the operation's call to stop a no-op.
 	set operations_copy $operations
 	set operations [list]
+	set completed_operation_count 0
 
 	foreach operation $operations_copy {
 		$operation stop

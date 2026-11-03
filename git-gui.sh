@@ -2078,7 +2078,8 @@ proc display_all_files {} {
 # double-clicking it returns to automatic sizing.
 set autosize_min_rows 3
 set autosize_min_share 0.2
-set autosize_min_width 160
+set autosize_min_width 300
+set autosize_min_width_share 0.2
 set autosize_max_width_share 0.4
 
 proc autosize_schedule {pw} {
@@ -2130,7 +2131,7 @@ proc autosize_split {pw} {
 }
 
 proc autosize_column {hp pw} {
-	global autosize_min_width autosize_max_width_share
+	global autosize_min_width autosize_min_width_share autosize_max_width_share
 	set total [winfo width $hp]
 	if {$total < 50} return
 	set want 0
@@ -2147,7 +2148,9 @@ proc autosize_column {hp pw} {
 	}
 	set w [expr {$want + $chrome + 8}]
 	set hi [expr {int($total * $autosize_max_width_share)}]
-	set w [expr {max($autosize_min_width, min($hi, $w))}]
+	set lo [expr {min($hi, max($autosize_min_width,
+		int($total * $autosize_min_width_share)))}]
+	set w [expr {max($lo, min($hi, $w))}]
 	if {abs($w - [$hp sashpos 0]) > 8} {
 		$hp sashpos 0 $w
 	}
