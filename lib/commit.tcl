@@ -115,12 +115,14 @@ proc do_signoff {} {
 
 proc create_new_commit {} {
 	global commit_type ui_comm commit_author
+	global force_prepare_commit_msg
 
 	set commit_type normal
 	unset -nocomplain commit_author
 	$ui_comm delete 0.0 end
 	$ui_comm edit reset
 	$ui_comm edit modified false
+	set force_prepare_commit_msg 1
 	rescan ui_ready
 }
 
@@ -313,10 +315,6 @@ proc commit_commitmsg_wait {fd_ph curHEAD msg_p} {
 proc wash_commit_message {msg} {
 	# Strip trailing whitespace
 	regsub -all -line {[ \t\r]+$} $msg {} msg
-	# Strip comment lines
-	global comment_string
-	set cmt_rx [strcat {(^|\n)} [regsub -all {\W} $comment_string {\\&}] {[^\n]*}]
-	regsub -all $cmt_rx $msg {\1} msg
 	# Strip leading and trailing empty lines (puts adds one \n)
 	set msg [string trim $msg \n]
 	# Compress consecutive empty lines

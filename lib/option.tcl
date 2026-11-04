@@ -150,17 +150,19 @@ proc do_options {} {
 		{b gui.matchtrackingbranch {mc "Match Tracking Branches"}}
 		{b gui.textconv {mc "Use Textconv For Diffs and Blames"}}
 		{b gui.fastcopyblame {mc "Blame Copy Only On Changed Files"}}
-		{i-0..100 gui.maxrecentrepo {mc "Maximum Length of Recent Repositories List"}}
 		{i-20..200 gui.copyblamethreshold {mc "Minimum Letters To Blame Copy On"}}
 		{i-0..300 gui.blamehistoryctx {mc "Blame History Context Radius (days)"}}
 		{i-1..99 gui.diffcontext {mc "Number of Diff Context Lines"}}
+		{b gui.diffwholefile {mc "Always Show Entire File in Diff"}}
 		{t gui.diffopts {mc "Additional Diff Parameters"}}
 		{i-0..99 gui.commitmsgwidth {mc "Commit Message Text Width"}}
 		{t gui.newbranchtemplate {mc "New Branch Name Template"}}
+		{t gui.browser {mc "Web Browser Command For Links (blank for system default)"}}
 		{c gui.encoding {mc "Default File Contents Encoding"}}
 		{b gui.warndetachedcommit {mc "Warn before committing to a detached head"}}
 		{s gui.stageuntracked {mc "Staging of untracked files"} {list "yes" "no" "ask"}}
 		{b gui.displayuntracked {mc "Show untracked files"}}
+		{b gui.autosizefilelists {mc "Autosize file lists"}}
 		{i-1..99 gui.tabsize {mc "Tab spacing"}}
 		} {
 		set type [lindex $option 0]
@@ -255,6 +257,29 @@ proc do_options {} {
 	}
 	unset all_dicts
 
+	incr optid
+	ttk::checkbutton $w.global.$optid \
+		-text [mc "Reopen Tabs From Last Session"] \
+		-variable global_config_new(gui.restoretabs) \
+		-onvalue true \
+		-offvalue false
+	pack $w.global.$optid -side top -anchor w
+
+	incr optid
+	set text [mc "Maximum Length of Recent Repositories List"]
+	ttk::frame $w.global.$optid
+	ttk::label $w.global.$optid.l -text [mc "%s:" $text]
+	tspinbox $w.global.$optid.v \
+		-textvariable global_config_new(gui.maxrecentrepo) \
+		-from 0 \
+		-to 100 \
+		-increment 1 \
+		-width 4
+	bind $w.global.$optid.v <FocusIn> {%W selection range 0 end}
+	pack $w.global.$optid.l -side left -anchor w -fill x
+	pack $w.global.$optid.v -side right -anchor e -padx 5
+	pack $w.global.$optid -side top -anchor w -fill x
+
 	set all_fonts [lsort [font families]]
 	foreach option $font_descs {
 		set name [lindex $option 0]
@@ -288,7 +313,13 @@ proc do_options {} {
 		pack $w.global.$name -side top -anchor w -fill x
 	}
 
-	bind $w <Visibility> "grab $w; focus $w.buttons.save"
+	# Unbind after the first exposure, otherwise every later <Visibility>
+	# event (e.g. an overlapping window closing) steals focus back.
+	bind $w <Visibility> "
+		[list bind $w <Visibility> {}]
+		grab $w
+		[list focus $w.buttons.save]
+	"
 	bind $w <Key-Escape> "destroy $w"
 	bind $w <Key-Return> [list do_save_config $w]
 
@@ -332,6 +363,8 @@ proc do_save_config {w} {
 	if {[catch {save_config} err]} {
 		error_popup [strcat [mc "Failed to completely save options:"] "\n\n$err"]
 	}
+	save_repo_tab_session
+	diff_map_update
 	reshow_diff
 	destroy $w
 }

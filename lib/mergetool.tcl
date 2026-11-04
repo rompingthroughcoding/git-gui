@@ -91,7 +91,9 @@ proc merge_load_stages {path cont} {
 	set merge_stages_fd [git_read [list ls-files -u -z -- $path]]
 
 	fconfigure $merge_stages_fd -blocking 0 -translation binary
-	fileevent $merge_stages_fd readable [list read_merge_stages $merge_stages_fd $cont]
+	fileevent $merge_stages_fd readable [list repoctx_dispatch [repoctx::current] \
+		[list read_merge_stages $merge_stages_fd $cont] \
+		{set ::diff_active 0; unlock_index}]
 }
 
 proc read_merge_stages {fd cont} {

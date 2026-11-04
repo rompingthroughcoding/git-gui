@@ -430,11 +430,11 @@ proc appname {} {
 }
 
 proc gitdir {args} {
-	global _gitdir
+	set dir [repoctx::field gitdir]
 	if {$args eq {}} {
-		return $_gitdir
+		return $dir
 	}
-	return [eval [list file join $_gitdir] $args]
+	return [eval [list file join $dir] $args]
 }
 
 proc githtmldir {args} {
@@ -453,7 +453,7 @@ proc githtmldir {args} {
 }
 
 proc reponame {} {
-	return $::_reponame
+	return [repoctx::field reponame]
 }
 
 proc is_enabled {option} {
@@ -479,6 +479,7 @@ proc disable_option {option} {
 proc is_many_config {name} {
 	switch -glob -- $name {
 	gui.recentrepo -
+	gui.sessionrepo -
 	remote.*.fetch -
 	remote.*.push
 		{return 1}
@@ -516,6 +517,15 @@ proc is_config_false {name} {
 proc get_config {name} {
 	global repo_config
 	if {[catch {set v $repo_config($name)}]} {
+		return {}
+	} else {
+		return $v
+	}
+}
+
+proc get_global_config {name} {
+	global global_config
+	if {[catch {set v $global_config($name)}]} {
 		return {}
 	} else {
 		return $v
@@ -750,6 +760,7 @@ if {[lsearch -exact [font names] TkDefaultFont] != -1} {
 		destroy .dummy
 	}
 }
+#font configure font_ui -size [expr {abs([font configure font_ui -size]) + 4}]
 
 font create font_uiitalic
 font create font_uibold
@@ -851,16 +862,19 @@ set default_config(gui.maxrecentrepo) 10
 set default_config(gui.copyblamethreshold) 40
 set default_config(gui.blamehistoryctx) 7
 set default_config(gui.diffcontext) 5
+set default_config(gui.diffwholefile) false
 set default_config(gui.diffopts) {}
 set default_config(gui.commitmsgwidth) 75
 set default_config(gui.newbranchtemplate) {}
 set default_config(gui.spellingdictionary) {}
+set default_config(gui.browser) {}
 set default_config(gui.fontui) [font configure font_ui]
 set default_config(gui.fontdiff) [font configure font_diff]
 # TODO: this option should be added to the git-config documentation
 set default_config(gui.maxfilesdisplayed) 5000
 set default_config(gui.usettk) 1
 set default_config(gui.warndetachedcommit) 1
+set default_config(gui.restoretabs) false
 set default_config(gui.tabsize) 8
 set font_descs {
 	{fontui   font_ui   {mc "Main Font"}}
@@ -868,6 +882,7 @@ set font_descs {
 }
 set default_config(gui.stageuntracked) ask
 set default_config(gui.displayuntracked) true
+set default_config(gui.autosizefilelists) true
 
 ######################################################################
 ##
@@ -983,6 +998,9 @@ if {$idx ne {}} {
 }
 unset -nocomplain idx fd
 
+# Multi-repo fork spike: per-repo context scaffolding (see lib/repoctx.tcl).
+source [file join $oguilib repoctx.tcl]
+
 ######################################################################
 ##
 ## config file parsing
@@ -996,8 +1014,8 @@ proc _parse_config {arr_name args} {
 			[concat config \
 			$args \
 			--null --list]]
-		fconfigure $fd_rc -encoding utf-8
-		set buf [read $fd_rc]
+		fconfigure $fd_rc -encoding binary -translation binary
+		set buf [encoding convertfrom utf-8 [read $fd_rc]]
 		close $fd_rc
 	}
 	foreach line [split $buf "\0"] {
@@ -1052,8 +1070,75 @@ if {$subcommand eq {gui.sh}} {
 	set subcommand gui
 }
 if {$subcommand eq {gui} && [llength $argv] > 0} {
-	set subcommand [lindex $argv 0]
-	set argv [lrange $argv 1 end]
+	set a [lindex $argv 0]
+	if {[file isdirectory $a]} {
+		# One or more repository path arguments: open each in its own tab.
+		# The first is the primary repo used for normal startup; the rest are
+		# opened as extra tabs once the UI is ready.
+		set _multi_repo_paths {}
+		foreach p $argv {
+			if {[file isdirectory $p]} {
+				lappend _multi_repo_paths [file normalize $p]
+			}
+		}
+		set argv {}
+		# Explicit paths win over any GIT_DIR/GIT_WORK_TREE inherited from the
+		# launching environment; point startup discovery at the first path.
+		catch {unset env(GIT_DIR)}
+		catch {unset env(GIT_WORK_TREE)}
+		catch {cd [lindex $_multi_repo_paths 0]}
+	} else {
+		set subcommand $a
+		set argv [lrange $argv 1 end]
+	}
+}
+
+# Restore the previous tab session only for an ordinary launch. Explicit repo
+# arguments and an inherited Git environment continue to select the startup repo.
+set _restore_repo_paths {}
+set _restore_active_repo {}
+if {$subcommand eq {gui}} {
+	_parse_config system_config --system
+	_parse_config global_config --global
+	set _restore_enabled 0
+	set _restore_setting_exists 0
+	set _restore_value false
+	if {[info exists system_config(gui.restoretabs)]} {
+		set _restore_setting_exists 1
+		set _restore_value [string tolower $system_config(gui.restoretabs)]
+	}
+	if {[info exists global_config(gui.restoretabs)]} {
+		set _restore_setting_exists 1
+		set _restore_value [string tolower $global_config(gui.restoretabs)]
+	}
+	if {$_restore_setting_exists} {
+		set _restore_enabled [expr {$_restore_value eq {} || $_restore_value in {true 1 yes on}}]
+	}
+	if {$_restore_enabled && [info exists global_config(gui.sessionrepo)]} {
+		foreach _session_path $global_config(gui.sessionrepo) {
+			if {[catch {set _session_path [file normalize $_session_path]}]
+				|| ![file isdirectory $_session_path]
+				|| ![file exists [file join $_session_path .git]]
+				|| [lsearch -exact $_restore_repo_paths $_session_path] >= 0} continue
+			if {[lsearch -exact $_restore_repo_paths $_session_path] < 0} {
+				lappend _restore_repo_paths $_session_path
+			}
+		}
+		if {[llength $_restore_repo_paths] > 0} {
+			set _restore_active_repo [lindex $_restore_repo_paths 0]
+			if {[info exists global_config(gui.sessionactive)]} {
+				set _candidate [file normalize $global_config(gui.sessionactive)]
+				if {[lsearch -exact $_restore_repo_paths $_candidate] >= 0} {
+					set _restore_active_repo $_candidate
+				}
+			}
+			if {![info exists _multi_repo_paths]
+				&& ![info exists env(GIT_DIR)]
+				&& ![info exists env(GIT_WORK_TREE)]} {
+				catch {cd $_restore_active_repo}
+			}
+		}
+	}
 }
 
 enable_option multicommit
@@ -1165,6 +1250,9 @@ if {![file isdirectory $_gitdir]} {
 	error_popup [strcat [mc "Git directory not found:"] "\n\n$_gitdir"]
 	exit 1
 }
+# Other tabs change the cwd, so a relative gitdir (e.g. ".git") would resolve
+# against the wrong repository.
+set _gitdir [file normalize $_gitdir]
 # _gitdir exists, so try loading the config
 load_config 0
 apply_config
@@ -1207,6 +1295,45 @@ if {[lindex $_reponame end] eq {.git}} {
 	set _reponame [lindex $_reponame end]
 }
 
+# Multi-repo fork spike: promote this repository's identity into a switchable
+# per-repo context. The gitdir/reponame accessors now read from it.
+repoctx::register $_gitdir $_gitworktree $_reponame \
+	[expr {[info exists _prefix] ? $_prefix : {}}]
+
+if {[info exists env(GITGUI_CTX_SELFTEST)]} {
+	set _ct_real [repoctx::current]
+	set ::current_diff_path "real/path.txt"
+	set ::HEAD "realbranch"
+	set ::ui_diff "real/ui_diff"
+	array set ::file_states {real.txt {_M {}}}
+	set _ct_fake [repoctx::open_context /fake/repo/.git /fake/repo demo-repo {}]
+	# A fresh context: fake repo's identity, live state (diff/HEAD/file_states/
+	# widget paths) all start clean rather than inheriting the real repo's.
+	set _ct_ok [expr {[gitdir] eq {/fake/repo/.git} && [reponame] eq {demo-repo} \
+		&& $::current_diff_path eq {} && $::HEAD eq {} && $::ui_diff eq {} \
+		&& [array size ::file_states] == 0}]
+	set ::current_diff_path "fake/other.txt"
+	set ::HEAD "fakebranch"
+	set ::ui_diff .nb.fake.vpane.diff.t
+	array set ::file_states {fake.txt {_M {}}}
+	repoctx::use $_ct_real
+	# Switching back restores every managed global for the real repo, and the
+	# fake repo's file_states entry is gone.
+	set _ct_ok [expr {$_ct_ok && [reponame] eq $_reponame && [gitdir] eq $_gitdir \
+		&& $::current_diff_path eq {real/path.txt} && $::HEAD eq {realbranch} \
+		&& $::ui_diff eq {real/ui_diff} \
+		&& [lindex $::file_states(real.txt) 0] eq {_M} \
+		&& ![info exists ::file_states(fake.txt)]}]
+	repoctx::forget $_ct_fake
+	array unset ::file_states
+	set ::current_diff_path {}
+	set ::HEAD {}
+	puts stderr "repoctx self-test: [expr {$_ct_ok ? {PASS} : {FAIL}}]\
+		(identity + current_diff_path + HEAD + file_states array + ui_* widget\
+		paths isolated across switch)"
+	unset -nocomplain _ct_real _ct_fake _ct_ok
+}
+
 set env(GIT_DIR) $_gitdir
 set env(GIT_WORK_TREE) $_gitworktree
 
@@ -1223,6 +1350,7 @@ set PARENT {}
 set MERGE_HEAD [list]
 set commit_type {}
 set commit_type_is_amend 0
+set force_prepare_commit_msg 0
 set empty_tree {}
 set current_branch {}
 set is_detached 0
@@ -1241,6 +1369,12 @@ set nullid2 "[string repeat 0 [expr $hashlength - 1]]1"
 ## task management
 
 set rescan_active 0
+set rescan_owner {}
+set rescan_all_active 0
+set rescan_all_ids {}
+set rescan_all_index 0
+set rescan_all_buttons {}
+set rescan_all_owner {}
 set diff_active 0
 set last_clicked {}
 
@@ -1253,6 +1387,8 @@ proc lock_index {type} {
 	if {$index_lock_type eq {none}} {
 		set index_lock_type $type
 		foreach w $disable_on_lock {
+			# Skip widgets from closed tabs that no longer exist.
+			if {![winfo exists [lindex $w 0]]} continue
 			uplevel #0 $w disabled
 		}
 		return 1
@@ -1264,11 +1400,17 @@ proc lock_index {type} {
 }
 
 proc unlock_index {} {
-	global index_lock_type disable_on_lock
+	global index_lock_type disable_on_lock rescan_all_active rescan_all_buttons
 
 	set index_lock_type none
 	foreach w $disable_on_lock {
-		uplevel #0 $w normal
+		if {![winfo exists [lindex $w 0]]} continue
+		set state normal
+		if {$rescan_all_active
+			&& [lsearch -exact $rescan_all_buttons [lindex $w 0]] >= 0} {
+			set state disabled
+		}
+		uplevel #0 [concat $w $state]
 	}
 }
 
@@ -1330,13 +1472,64 @@ proc force_amend {} {
 	do_select_commit_type
 }
 
+# Rescan runs asynchronously via fileevent callbacks that write to the live
+# globals (file_states, ui_* widgets, HEAD/commit_type). If the user switches
+# tabs while a rescan is in flight, those writes must still land on the repo the
+# rescan was started for. Wrap each callback so it runs in its origin context and
+# restores the active one afterward. If the origin tab was closed mid-rescan the
+# callback is dropped (and its pipe closed) rather than corrupting the now-active
+# repo. Rescans are serialized (rescan_active), so only one is ever in flight.
+# A full context swap copies file_states/repo_config, so for a background repo
+# pipe output is buffered without swapping and parsed once at EOF.
+proc rescan_dispatch {cmd} {
+	global rescan_owner rescan_pending
+	set fd [lindex $cmd 1]
+	if {$rescan_owner ne {} && [lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		unset -nocomplain rescan_pending($fd)
+		catch {close $fd}
+		return
+	}
+	set prev [repoctx::current]
+	set swap [expr {$rescan_owner ne {} && $rescan_owner ne $prev}]
+	if {$swap} {
+		append rescan_pending($fd) [read $fd]
+		if {![eof $fd]} return
+		repoctx::use $rescan_owner
+	}
+	set code [catch {uplevel #0 $cmd} res opts]
+	if {$swap} { catch {repoctx::use $prev} }
+	return -options $opts $res
+}
+
+# Read from a rescan pipe, including any output buffered by rescan_dispatch.
+proc rescan_read {fd} {
+	global rescan_pending
+	set data {}
+	if {[info exists rescan_pending($fd)]} {
+		set data $rescan_pending($fd)
+		unset rescan_pending($fd)
+	}
+	append data [read $fd]
+	return $data
+}
+
 proc rescan {after {honor_trustmtime 1}} {
 	global HEAD PARENT MERGE_HEAD commit_type
 	global ui_index ui_workdir ui_comm
-	global rescan_active file_states
+	global rescan_active rescan_owner file_states
 	global repo_config
+	global force_prepare_commit_msg
 
+	# Self-heal: a rescan whose tab was closed mid-scan may have left the shared
+	# lock set; clear it so this rescan can proceed.
+	if {$rescan_active > 0 && $rescan_owner ne {}
+		&& [lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		set rescan_active 0
+		catch {unlock_index}
+	}
 	if {$rescan_active > 0 || ![lock_index read]} return
+	set rescan_owner [repoctx::current]
+	catch {tools_base_invalidate}
 
 	repository_state newType newHEAD newMERGE_HEAD
 	if {[string match amend* $commit_type]
@@ -1350,6 +1543,14 @@ proc rescan {after {honor_trustmtime 1}} {
 	}
 
 	array unset file_states
+
+	if {$force_prepare_commit_msg} {
+		# Drop the saved/backed up message so the hook is reached below.
+		set force_prepare_commit_msg 0
+		set ::GITGUI_BCK_exists 0
+		catch {file delete [gitdir GITGUI_BCK]}
+		catch {file delete [gitdir GITGUI_MSG]}
+	}
 
 	if {!$::GITGUI_BCK_exists &&
 		(![$ui_comm edit modified]
@@ -1378,7 +1579,7 @@ proc rescan {after {honor_trustmtime 1}} {
 			]]
 		fconfigure $fd_rf -blocking 0 -translation binary
 		fileevent $fd_rf readable \
-			[list rescan_stage2 $fd_rf $after]
+			[list rescan_dispatch [list rescan_stage2 $fd_rf $after]]
 	}
 }
 
@@ -1390,7 +1591,7 @@ proc rescan_stage2 {fd after} {
 	global rescan_active buf_rdi buf_rdf buf_rlo
 
 	if {$fd ne {}} {
-		read $fd
+		rescan_read $fd
 		if {![eof $fd]} return
 		close $fd
 	}
@@ -1409,18 +1610,18 @@ proc rescan_stage2 {fd after} {
 	fconfigure $fd_di -blocking 0 -translation binary
 	fconfigure $fd_df -blocking 0 -translation binary
 
-	fileevent $fd_di readable [list read_diff_index $fd_di $after]
-	fileevent $fd_df readable [list read_diff_files $fd_df $after]
+	fileevent $fd_di readable [list rescan_dispatch [list read_diff_index $fd_di $after]]
+	fileevent $fd_df readable [list rescan_dispatch [list read_diff_files $fd_df $after]]
 
 	if {[is_config_true gui.displayuntracked]} {
 		set fd_lo [git_read [concat ls-files --others -z $ls_others]]
 		fconfigure $fd_lo -blocking 0 -translation binary
-		fileevent $fd_lo readable [list read_ls_others $fd_lo $after]
+		fileevent $fd_lo readable [list rescan_dispatch [list read_ls_others $fd_lo $after]]
 		incr rescan_active
 	}
 }
 
-proc load_message {file {encoding {}}} {
+proc load_message {file {encoding {}} {keep_trailing_space 0}} {
 	global ui_comm
 
 	set f [gitdir $file]
@@ -1431,9 +1632,17 @@ proc load_message {file {encoding {}}} {
 		if {$encoding ne {}} {
 			fconfigure $fd -encoding $encoding
 		}
-		set content [string trim [read $fd]]
+		set content [read $fd]
 		close $fd
+		set tail {}
+		if {$keep_trailing_space} {
+			regexp {[ ]*$} [string trimright $content "\r\n"] tail
+		}
+		set content [string trim $content]
 		regsub -all -line {[ \r\t]+$} $content {} content
+		if {$content ne {}} {
+			append content $tail
+		}
 		$ui_comm delete 0.0 end
 		$ui_comm insert end $content
 		return 1
@@ -1485,10 +1694,26 @@ proc run_prepare_commit_msg_hook {} {
 	set pch_error {}
 
 	fconfigure $fd_ph -blocking 0 -translation binary
-	fileevent $fd_ph readable \
-		[list prepare_commit_msg_hook_wait $fd_ph]
+	fileevent $fd_ph readable [list repoctx_dispatch [repoctx::current] \
+		[list prepare_commit_msg_hook_wait $fd_ph]]
 
 	return 1;
+}
+
+# Run $cmd in context $id, restoring the active context afterward. If the
+# context's tab was closed, close the pipe and run $on_gone instead.
+proc repoctx_dispatch {id cmd {on_gone {}}} {
+	if {[lsearch -exact [repoctx::ids] $id] < 0} {
+		catch {close [lindex $cmd 1]}
+		uplevel #0 $on_gone
+		return
+	}
+	set prev [repoctx::current]
+	set swap [expr {$id ne $prev}]
+	if {$swap} { repoctx::use $id }
+	set code [catch {uplevel #0 $cmd} res opts]
+	if {$swap} { catch {repoctx::use $prev} }
+	return -options $opts $res
 }
 
 proc prepare_commit_msg_hook_wait {fd_ph} {
@@ -1503,7 +1728,7 @@ proc prepare_commit_msg_hook_wait {fd_ph} {
 			catch {file delete [gitdir PREPARE_COMMIT_MSG]}
 			exit 1
 		} else {
-			load_message PREPARE_COMMIT_MSG
+			load_message PREPARE_COMMIT_MSG {} 1
 		}
 		set pch_error {}
 		catch {file delete [gitdir PREPARE_COMMIT_MSG]}
@@ -1516,7 +1741,7 @@ proc prepare_commit_msg_hook_wait {fd_ph} {
 proc read_diff_index {fd after} {
 	global buf_rdi
 
-	append buf_rdi [read $fd]
+	append buf_rdi [rescan_read $fd]
 	set c 0
 	set n [string length $buf_rdi]
 	while {$c < $n} {
@@ -1549,7 +1774,7 @@ proc read_diff_index {fd after} {
 proc read_diff_files {fd after} {
 	global buf_rdf
 
-	append buf_rdf [read $fd]
+	append buf_rdf [rescan_read $fd]
 	set c 0
 	set n [string length $buf_rdf]
 	while {$c < $n} {
@@ -1582,7 +1807,7 @@ proc read_diff_files {fd after} {
 proc read_ls_others {fd after} {
 	global buf_rlo
 
-	append buf_rlo [read $fd]
+	append buf_rlo [rescan_read $fd]
 	set pck [split $buf_rlo "\0"]
 	set buf_rlo [lindex $pck end]
 	foreach p [lrange $pck 0 end-1] {
@@ -1596,7 +1821,7 @@ proc read_ls_others {fd after} {
 }
 
 proc rescan_done {fd buf after} {
-	global rescan_active current_diff_path
+	global rescan_active current_diff_path rescan_all_active rescan_all_owner
 	global file_states repo_config
 	upvar $buf to_clear
 
@@ -1608,6 +1833,10 @@ proc rescan_done {fd buf after} {
 	prune_selection
 	unlock_index
 	display_all_files
+	if {$rescan_all_active && $rescan_all_owner eq [repoctx::current]} {
+		set rescan_all_owner {}
+		return
+	}
 	if {$current_diff_path ne {}} { reshow_diff $after }
 	if {$current_diff_path eq {}} { select_first_diff $after }
 }
@@ -1629,7 +1858,9 @@ proc prune_selection {} {
 proc mapicon {w state path} {
 	global all_icons
 
-	if {[catch {set r $all_icons($state$w)}]} {
+	# Icons are keyed by list kind; each repo tab has its own list widgets.
+	set kind [lindex [split $w .] end-1]
+	if {[catch {set r $all_icons($state.$kind)}]} {
 		puts "error: no icon for $w state={$state} $path"
 		return file_plain
 	}
@@ -1776,6 +2007,7 @@ proc display_file {path state} {
 		unset file_states($path)
 		catch {unset selected_paths($path)}
 	}
+	autosize_schedule [winfo parent [winfo parent $ui_index]]
 }
 
 proc display_all_files_helper {w path icon_name m} {
@@ -1845,6 +2077,107 @@ proc display_all_files {} {
 
 	$ui_index conf -state disabled
 	$ui_workdir conf -state disabled
+	autosize_schedule [winfo parent [winfo parent $ui_index]]
+}
+
+# -- File list autosizing
+#
+# Fits the Unstaged/Staged split to their contents and the file column to the
+# longest path, within limits. Dragging a sash pins it for the session;
+# double-clicking it returns to automatic sizing.
+set autosize_min_rows 3
+set autosize_min_share 0.2
+set autosize_min_width 300
+set autosize_min_width_share 0.2
+set autosize_max_width_share 0.4
+
+proc autosize_schedule {pw} {
+	global autosize_pending
+	if {[info exists autosize_pending($pw)]} return
+	set autosize_pending($pw) [after idle [list autosize_file_lists $pw]]
+}
+
+proc autosize_file_lists {pw} {
+	global autosize_pending autosize_pinned
+	unset -nocomplain autosize_pending($pw)
+	if {![winfo exists $pw] || ![winfo viewable $pw]} return
+	if {![is_config_true gui.autosizefilelists]} return
+	if {![info exists autosize_pinned($pw)]} {
+		autosize_split $pw
+	}
+	set hp [winfo parent $pw]
+	if {![info exists autosize_pinned($hp)]} {
+		autosize_column $hp $pw
+	}
+}
+
+proc autosize_split {pw} {
+	global autosize_min_rows autosize_min_share
+	set top $pw.workdir
+	set bot $pw.index
+	set avail [expr {[winfo height $top] + [winfo height $bot]}]
+	if {$avail < 20} return
+	foreach f [list $top $bot] {
+		set t $f.list
+		set rows [expr {int([$t index end-1c]) - 1}]
+		set px [$t count -update -ypixels 1.0 end-1c]
+		if {$rows > 0} {
+			set lh [expr {double($px) / $rows}]
+		} else {
+			set lh [font metrics [$t cget -font] -linespace]
+		}
+		set chrome [expr {[winfo height $f] - [winfo height $t]}]
+		set want($f) [expr {$chrome + $px + 4}]
+		set min($f) [expr {$chrome + $autosize_min_rows * $lh}]
+	}
+	set lo [expr {max($min($top), $avail * $autosize_min_share)}]
+	set hi [expr {min($avail - $min($bot), $avail * (1 - $autosize_min_share))}]
+	set h [expr {double($avail) * $want($top) / ($want($top) + $want($bot))}]
+	set h [expr {int(max($lo, min($hi, $h)))}]
+	if {abs($h - [$pw sashpos 0]) > 8} {
+		$pw sashpos 0 $h
+	}
+}
+
+proc autosize_column {hp pw} {
+	global autosize_min_width autosize_min_width_share autosize_max_width_share
+	set total [winfo width $hp]
+	if {$total < 50} return
+	set want 0
+	set chrome 0
+	foreach t [list $pw.workdir.list $pw.index.list] {
+		set f [$t cget -font]
+		set icon 0
+		catch {set icon [expr {[image width [$t image cget 1.0 -image]] + 10}]}
+		foreach line [split [$t get 1.0 end-1c] \n] {
+			set want [expr {max($want, $icon + [font measure $f $line])}]
+		}
+		set chrome [expr {max($chrome,
+			[winfo width [winfo parent $t]] - [winfo width $t])}]
+	}
+	set w [expr {$want + $chrome + 8}]
+	set hi [expr {int($total * $autosize_max_width_share)}]
+	set lo [expr {min($hi, max($autosize_min_width,
+		int($total * $autosize_min_width_share)))}]
+	set w [expr {max($lo, min($hi, $w))}]
+	if {abs($w - [$hp sashpos 0]) > 8} {
+		$hp sashpos 0 $w
+	}
+}
+
+proc autosize_press {w} {
+	set ::autosize_press($w) [$w sashpos 0]
+}
+proc autosize_release {w} {
+	if {[info exists ::autosize_press($w)]
+	    && [$w sashpos 0] != $::autosize_press($w)} {
+		set ::autosize_pinned($w) 1
+	}
+	unset -nocomplain ::autosize_press($w)
+}
+proc autosize_unpin {w pw} {
+	unset -nocomplain ::autosize_pinned($w)
+	autosize_schedule $pw
 }
 
 ######################################################################
@@ -1926,19 +2259,19 @@ static unsigned char file_statechange_bits[] = {
 set ui_index .vpane.files.index.list
 set ui_workdir .vpane.files.workdir.list
 
-set all_icons(_$ui_index)   file_plain
-set all_icons(A$ui_index)   file_plain
-set all_icons(M$ui_index)   file_fulltick
-set all_icons(D$ui_index)   file_removed
-set all_icons(U$ui_index)   file_merge
-set all_icons(T$ui_index)   file_statechange
+set all_icons(_.index)   file_plain
+set all_icons(A.index)   file_plain
+set all_icons(M.index)   file_fulltick
+set all_icons(D.index)   file_removed
+set all_icons(U.index)   file_merge
+set all_icons(T.index)   file_statechange
 
-set all_icons(_$ui_workdir) file_plain
-set all_icons(M$ui_workdir) file_mod
-set all_icons(D$ui_workdir) file_question
-set all_icons(U$ui_workdir) file_merge
-set all_icons(O$ui_workdir) file_plain
-set all_icons(T$ui_workdir) file_statechange
+set all_icons(_.workdir) file_plain
+set all_icons(M.workdir) file_mod
+set all_icons(D.workdir) file_question
+set all_icons(U.workdir) file_merge
+set all_icons(O.workdir) file_plain
+set all_icons(T.workdir) file_statechange
 
 set max_status_desc 0
 foreach i {
@@ -2135,6 +2468,166 @@ proc do_file_open {file} {
 	safe_exec_bg $cmd
 }
 
+# Split a gui.browser value into an exec command list.  Accepts a bare program
+# path (which may contain spaces), an optionally quoted path followed by
+# arguments, or a plain "program arg arg" string.  Backslashes are preserved.
+proc parse_browser_command {spec} {
+	set spec [string trim $spec]
+	if {$spec eq {}} {
+		return {}
+	}
+
+	set quote [string index $spec 0]
+	if {$quote eq {"} || $quote eq {'}} {
+		set close [string first $quote $spec 1]
+		if {$close > 0} {
+			set prog [string range $spec 1 [expr {$close - 1}]]
+			set rest [string trim [string range $spec [expr {$close + 1}] end]]
+			set cmd [list $prog]
+			if {$rest ne {}} {
+				foreach arg [regexp -all -inline {\S+} $rest] {
+					lappend cmd $arg
+				}
+			}
+			return $cmd
+		}
+	}
+
+	if {[file executable $spec]} {
+		return [list $spec]
+	}
+
+	set cmd {}
+	foreach arg [regexp -all -inline {\S+} $spec] {
+		lappend cmd $arg
+	}
+	return $cmd
+}
+
+# Open an URL with gui.browser, or the default associated app when unset.
+proc do_url_open {url} {
+	set cmd [parse_browser_command [get_config gui.browser]]
+	if {$cmd eq {}} {
+		if {[is_Cygwin]} {
+			set cmd [list /bin/cygstart.exe]
+		} else {
+			set cmd [get_explorer]
+		}
+	} else {
+		set prog [lindex $cmd 0]
+		if {[regexp {[/\\]} $prog] && ![file executable $prog]} {
+			error_popup [strcat \
+				[mc "The configured web browser cannot be run:"] \
+				"\n\n$prog\n\n" \
+				[mc "Check the gui.browser setting in Edit > Options."]]
+			return
+		}
+	}
+	lappend cmd $url
+	if {[catch {safe_exec_bg $cmd} err]} {
+		error_popup [strcat [mc "Failed to open the web browser:"] "\n\n$err"]
+	}
+}
+
+proc url_encode {str} {
+	set out {}
+	foreach ch [split $str {}] {
+		if {[string match {[A-Za-z0-9._~-]} $ch]} {
+			append out $ch
+		} else {
+			foreach byte [split [encoding convertto utf-8 $ch] {}] {
+				append out [format %%%02X [scan $byte %c]]
+			}
+		}
+	}
+	return $out
+}
+
+# Translate an Azure DevOps remote URL into the base web URL of the
+# repository.  Returns {} when the remote is not an Azure DevOps one.
+proc ado_repo_web_url {remote_url} {
+	set u [string trimright $remote_url /]
+	regsub {\.git$} $u {} u
+
+	# git@ssh.dev.azure.com:v3/<org>/<project>/<repo>
+	# ssh://git@ssh.dev.azure.com:22/v3/<org>/<project>/<repo>
+	if {[regexp -nocase \
+		{ssh\.dev\.azure\.com(?::[0-9]+)?[:/]v3/([^/]+)/([^/]+)/([^/]+)$} \
+		$u _ org project repo]} {
+		return "https://dev.azure.com/$org/$project/_git/$repo"
+	}
+
+	# https://<org>@dev.azure.com/<org>/<project>/_git/<repo>
+	if {[regexp -nocase \
+		{dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/]+)$} \
+		$u _ org project repo]} {
+		return "https://dev.azure.com/$org/$project/_git/$repo"
+	}
+
+	# https://<org>.visualstudio.com/[DefaultCollection/]<project>/_git/<repo>
+	if {[regexp -nocase \
+		{^[a-z+]+://(?:[^@/]+@)?([^./]+)\.visualstudio\.com/(?:DefaultCollection/)?([^/]+)/_git/([^/]+)$} \
+		$u _ org project repo]} {
+		return "https://dev.azure.com/$org/$project/_git/$repo"
+	}
+
+	return {}
+}
+
+# Build the Azure DevOps web URL showing $path at the checked out revision.
+proc ado_file_url {path} {
+	global repo_config current_branch is_detached
+
+	set remote {}
+	if {[info exists repo_config(remote.origin.url)]} {
+		set remote $repo_config(remote.origin.url)
+	} else {
+		foreach k [lsort [array names repo_config remote.*.url]] {
+			set remote $repo_config($k)
+			break
+		}
+	}
+	if {$remote eq {}} {
+		return {}
+	}
+
+	set base [ado_repo_web_url $remote]
+	if {$base eq {}} {
+		return {}
+	}
+
+	if {$is_detached} {
+		if {[catch {set version GC[git rev-parse HEAD]}]} {
+			return {}
+		}
+	} else {
+		set version GB$current_branch
+	}
+
+	return "$base?path=[url_encode /$path]&version=[url_encode $version]&_a=contents"
+}
+
+proc do_ado_open {path} {
+	if {$path eq {}} return
+	set url [ado_file_url $path]
+	if {$url eq {}} {
+		error_popup [mc "This repository has no Azure DevOps remote."]
+		return
+	}
+	do_url_open $url
+}
+
+proc do_ado_copy {path} {
+	if {$path eq {}} return
+	set url [ado_file_url $path]
+	if {$url eq {}} {
+		error_popup [mc "This repository has no Azure DevOps remote."]
+		return
+	}
+	clipboard clear
+	clipboard append -format STRING -type STRING -- $url
+}
+
 set is_quitting 0
 set ret_code    1
 
@@ -2152,6 +2645,7 @@ proc do_quit {{rc {1}}} {
 
 	if {$is_quitting} return
 	set is_quitting 1
+	if {[winfo exists .repotabs]} { catch {save_repo_tab_session} }
 
 	if {[winfo exists $ui_comm]} {
 		# -- Stash our current commit buffer.
@@ -2206,8 +2700,8 @@ proc do_quit {{rc {1}}} {
 		}
 		set cfg_geometry [list]
 		lappend cfg_geometry [wm geometry .]
-		lappend cfg_geometry [.vpane sashpos 0]
-		lappend cfg_geometry [.vpane.files sashpos 0]
+		lappend cfg_geometry [$::ui_vpane sashpos 0]
+		lappend cfg_geometry [$::ui_vpane_files sashpos 0]
 		if {[catch {set rc_geometry $repo_config(gui.geometry)}]} {
 			set rc_geometry {}
 		}
@@ -2231,6 +2725,75 @@ proc do_rescan {} {
 
 proc ui_do_rescan {} {
 	rescan {force_first_diff ui_ready}
+}
+
+proc do_rescan_all {} {
+	global rescan_all_active rescan_all_ids rescan_all_index rescan_all_buttons
+	global repo_tab_pending repo_tab_load_queue repo_tab_load_timer
+	if {$rescan_all_active} return
+	set rescan_all_active 1
+	if {$repo_tab_load_timer ne {}} { after cancel $repo_tab_load_timer }
+	set repo_tab_load_timer {}
+	set repo_tab_load_queue {}
+	foreach w $rescan_all_buttons {
+		if {[winfo exists $w]} { $w configure -state disabled }
+	}
+	set previous [repoctx::current]
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_pending($tab)]} { repo_tab_initialize $tab 0 }
+	}
+	if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+		repoctx::use $previous
+		catch {cd [repoctx::field worktree]}
+	}
+	set rescan_all_ids [repoctx::ids]
+	set rescan_all_index 0
+	rescan_all_next
+}
+
+proc rescan_all_next {} {
+	global rescan_active rescan_owner index_lock_type
+	global rescan_all_active rescan_all_ids rescan_all_index rescan_all_buttons
+	global current_diff_path rescan_all_owner
+	if {!$rescan_all_active} return
+
+	# A closed tab drops its pending fileevent callbacks, so release its stale lock.
+	if {$rescan_active > 0 && $rescan_owner ne {}
+		&& [lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		set rescan_active 0
+		set rescan_owner {}
+		catch {unlock_index}
+	}
+	if {$rescan_active > 0 || $index_lock_type ne {none}} {
+		after 100 rescan_all_next
+		return
+	}
+
+	while {$rescan_all_index < [llength $rescan_all_ids]} {
+		set id [lindex $rescan_all_ids $rescan_all_index]
+		incr rescan_all_index
+		if {[lsearch -exact [repoctx::ids] $id] < 0} continue
+
+		set previous [repoctx::current]
+		set rescan_all_owner $id
+		repoctx::use $id
+		rescan {}
+		if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+			repoctx::use $previous
+		}
+		after 100 rescan_all_next
+		return
+	}
+
+	set rescan_all_active 0
+	foreach w $rescan_all_buttons {
+		if {[winfo exists $w]} { $w configure -state normal }
+	}
+	if {$current_diff_path ne {}} {
+		reshow_diff ui_ready
+	} else {
+		select_first_diff ui_ready
+	}
 }
 
 proc do_commit {} {
@@ -2597,6 +3160,18 @@ if {[is_enabled multicommit] || [is_enabled singlecommit]} {
 #
 menu .mbar.repository
 
+.mbar.repository add command \
+	-label [mc "Open Repository In New Tab..."] \
+	-command do_open_repo_tab
+menu .mbar.repository.recent -postcommand populate_recent_tab_menu
+.mbar.repository add cascade \
+	-label [mc "Open Recent In New Tab"] \
+	-menu .mbar.repository.recent
+.mbar.repository add command \
+	-label [mc "Close Tab"] \
+	-command close_repo_tab
+.mbar.repository add separator
+
 if {![is_bare]} {
 	.mbar.repository add command \
 		-label [mc "Explore Working Copy"] \
@@ -2774,6 +3349,12 @@ if {[is_enabled multicommit] || [is_enabled singlecommit]} {
 	lappend disable_on_lock \
 		[list .mbar.commit entryconf [.mbar.commit index last] -state]
 
+	.mbar.commit add command -label [mc "Rescan All Tabs"] \
+		-command do_rescan_all \
+		-accelerator Shift-F5
+	lappend disable_on_lock \
+		[list .mbar.commit entryconf [.mbar.commit index last] -state]
+
 	.mbar.commit add command -label [mc "Stage To Commit"] \
 		-command do_add_selection \
 		-accelerator $M1T-T
@@ -2807,6 +3388,22 @@ if {[is_enabled multicommit] || [is_enabled singlecommit]} {
 	.mbar.commit add command -label [mc "Show More Context"] \
 		-command show_more_context \
 		-accelerator $M1T-=
+
+	.mbar.commit add checkbutton -label [mc "Always Show Entire File"] \
+		-variable diff_whole_file_ui \
+		-command diff_whole_file_changed
+
+	.mbar.commit add command -label [mc "Next Change"] \
+		-command {diff_goto_change 1} \
+		-accelerator F3
+
+	.mbar.commit add command -label [mc "Previous Change"] \
+		-command {diff_goto_change -1} \
+		-accelerator Shift-F3
+
+	.mbar.commit add command -label [mc "Find Text..."] \
+		-command diff_show_finder \
+		-accelerator $M1T-F
 
 	.mbar.commit add separator
 
@@ -3089,73 +3686,487 @@ default {
 
 # -- Branch Control
 #
-ttk::frame .branch
-ttk::label .branch.l1 \
-	-text [mc "Current Branch:"] \
-	-anchor w \
-	-justify left
-ttk::label .branch.cb \
-	-textvariable current_branch \
-	-anchor w \
-	-justify left
-pack .branch.l1 -side left
-pack .branch.cb -side left -fill x
-pack .branch -side top -fill x
-
+proc build_branch_control {w} {
+	ttk::frame $w
+	ttk::label $w.l1 \
+		-text [mc "Current Branch:"] \
+		-anchor w \
+		-justify left
+	ttk::label $w.cb \
+		-textvariable current_branch \
+		-anchor w \
+		-justify left
+	pack $w.l1 -side left
+	pack $w.cb -side left -fill x
+	pack $w -side top -fill x
+}
 # -- Main Window Layout
 #
-ttk::panedwindow .vpane -orient horizontal
-ttk::panedwindow .vpane.files -orient vertical
-.vpane add .vpane.files
-pack .vpane -anchor n -side top -fill both -expand 1
+# Multi-repo fork: repositories live in notebook tabs. Each tab is a frame under
+# which the whole layout is built (via $ui_w). ui_vpane/ui_vpane_files are
+# exposed as globals for the sash geometry save/restore and console sizing.
+ttk::notebook .repotabs
+pack .repotabs -side top -fill both -expand 1
 
-# -- Working Directory File List
+# Draw a distinct border/divider between tabs. The native Windows (vista) theme
+# ignores custom tab border colors, so borrow clam's tab element -- which honors
+# -bordercolor -- for this notebook only, leaving the rest of the app native.
+ttk::style configure Repo.TNotebook -tabmargins {4 2 4 0}
+if {![catch {
+	ttk::style element create RepoTab.tab from clam Notebook.tab
+}]} {
+	ttk::style layout Repo.TNotebook.Tab {
+		RepoTab.tab -sticky nswe -children {
+			Notebook.padding -side top -sticky nswe -children {
+				Notebook.label -side top -sticky nswe
+			}
+		}
+	}
+	ttk::style configure Repo.TNotebook.Tab \
+		-padding {14 5} -borderwidth 2 -bordercolor #4d4d4d -background #d9d9d9
+	ttk::style map Repo.TNotebook.Tab \
+		-background {selected #ffffff} \
+		-bordercolor {selected #1a1a1a}
+} else {
+	ttk::style configure Repo.TNotebook.Tab -padding {14 5}
+}
+.repotabs configure -style Repo.TNotebook
 
-textframe .vpane.files.workdir -height 100 -width 200
-tlabel .vpane.files.workdir.title -text [mc "Unstaged Changes"] \
-	-background lightsalmon -foreground black
-ttext $ui_workdir \
-	-borderwidth 0 \
-	-width 20 -height 10 \
-	-wrap none \
-	-takefocus 1 -highlightthickness 1\
-	-cursor $cursor_ptr \
-	-xscrollcommand {.vpane.files.workdir.sx set} \
-	-yscrollcommand {.vpane.files.workdir.sy set} \
-	-state disabled
-ttk::scrollbar .vpane.files.workdir.sx -orient h -command [list $ui_workdir xview]
-ttk::scrollbar .vpane.files.workdir.sy -orient v -command [list $ui_workdir yview]
-pack .vpane.files.workdir.title -side top -fill x
-pack .vpane.files.workdir.sx -side bottom -fill x
-pack .vpane.files.workdir.sy -side right -fill y
-pack $ui_workdir -side left -fill both -expand 1
+# Rescan All sits in the empty right end of the tab strip; the right tab margin
+# reserves its width so tabs never slide underneath it.
+ttk::button .rescan_all -text [mc "Rescan All"] -style Toolbutton \
+	-command do_rescan_all
+foreach action {expand collapse} {
+	foreach {suffix color foreground} {normal #555555 white disabled #aaaaaa #dddddd} {
+		set icon repo_tab_${action}_$suffix
+		image create photo $icon -width 22 -height 18
+		$icon put $color -to 0 0 22 18
+		$icon put $foreground -to 5 8 17 10
+		if {$action eq "expand"} { $icon put $foreground -to 10 3 12 15 }
+	}
+	ttk::button .group_$action \
+		-image [list repo_tab_${action}_normal disabled repo_tab_${action}_disabled] \
+		-style Toolbutton -command [list repo_tab_set_all [expr {$action eq "collapse"}]]
+	bind .group_$action <Enter> [list repo_tab_all_tooltip $action]
+	bind .group_$action <Leave> repo_tab_hide_tooltip
+	bind .group_$action <ButtonPress> repo_tab_hide_tooltip
+}
+unset action suffix color foreground icon
+lappend rescan_all_buttons .rescan_all
+lappend disable_on_lock [list .rescan_all conf -state]
+set _rescan_all_w [expr {max([winfo reqwidth .rescan_all],
+	[font measure TkDefaultFont [.rescan_all cget -text]] + 24)}]
+ttk::style configure Repo.TNotebook \
+	-tabmargins [list 4 2 [expr {$_rescan_all_w + [winfo reqwidth .group_expand] + [winfo reqwidth .group_collapse] + 28}] 0]
+place .rescan_all -in .repotabs -relx 1.0 -x -4 -y 1 -anchor ne
+place .group_collapse -in .repotabs -relx 1.0 -x [expr {-$_rescan_all_w - 12}] -y 1 -anchor ne
+place .group_expand -in .repotabs -relx 1.0 -x [expr {-$_rescan_all_w - [winfo reqwidth .group_collapse] - 20}] -y 1 -anchor ne
+unset _rescan_all_w
+raise .rescan_all
+raise .group_expand
+raise .group_collapse
 
-# -- Index File List
+set repo_tab_palette {
+	#4e79a7 #59a14f #e15759 #b07aa1 #f28e2b
+	#76b7b2 #edc948 #ff9da7 #9c755f #bab0ac}
+set repo_tab_swatch_seq 0
+array set repo_tab_family {}
+array set repo_tab_images {}
+array set repo_tab_image_state {}
+array set repo_tab_main {}
+array set repo_tab_discovery {}
+array set repo_tab_pending {}
+set repo_tab_load_queue {}
+set repo_tab_load_timer {}
+array set repo_tab_collapsed {}
+array set repo_tab_representative {}
+set repo_tab_hover {}
+set repo_tab_hover_timer {}
+set repo_tab_all_states {}
+proc repo_tab_decorate {family} {
+	global repo_tab_palette repo_tab_swatch_seq repo_tab_images
+	if {[info exists repo_tab_images($family)]} { return $repo_tab_images($family) }
+	set color [lindex $repo_tab_palette \
+		[expr {$repo_tab_swatch_seq % [llength $repo_tab_palette]}]]
+	set n [incr repo_tab_swatch_seq]
+	set img repo_tab_swatch_$n
+	image create photo $img -width 22 -height 18
+	$img put $color -to 0 0 22 18
+	set repo_tab_images($family) $img
+	return $img
+}
+
+proc repo_tab_refresh_groups {} {
+	global repo_tab_family repo_tab_images repo_tab_image_state repo_tab_collapsed repo_tab_representative
+	global repo_tab_all_states
+	set groups [dict create]
+	foreach tab [.repotabs tabs] {
+		if {![info exists repo_tab_family($tab)]} continue
+		dict lappend groups [dict get $repo_tab_family($tab) family] $tab
+	}
+	set selected [.repotabs select]
+	set position 0
+	set expandable 0
+	set expanded 0
+	dict for {family tabs} $groups {
+		set main_tabs {}
+		set worktree_tabs {}
+		foreach tab $tabs {
+			set path [dict get $repo_tab_family($tab) path]
+			set main [dict get $repo_tab_family($tab) repository]
+			if {$path eq $main || ([is_Windows] && [string equal -nocase $path $main])} {
+				lappend main_tabs $tab
+			} else {
+				lappend worktree_tabs $tab
+			}
+		}
+		set tabs [concat $main_tabs $worktree_tabs]
+		foreach tab $tabs {
+			if {[.repotabs index $tab] != $position} {
+				.repotabs insert $position $tab
+			}
+			incr position
+		}
+		if {![info exists repo_tab_collapsed($family)]} { set repo_tab_collapsed($family) 0 }
+		if {[lsearch -exact $tabs $selected] >= 0} {
+			set repo_tab_representative($family) $selected
+		} elseif {![info exists repo_tab_representative($family)] ||
+			[lsearch -exact $tabs $repo_tab_representative($family)] < 0} {
+			set repo_tab_representative($family) [lindex $tabs 0]
+		}
+		set representative $repo_tab_representative($family)
+		set count [llength $tabs]
+		set collapsed [expr {$repo_tab_collapsed($family) && $count > 1}]
+		if {$count > 1} {
+			incr expandable
+			if {!$collapsed} { incr expanded }
+		}
+		foreach tab $tabs {
+			set label [dict get $repo_tab_family($tab) label]
+			if {$collapsed && $tab eq $representative} {
+				set label [file tail [dict get $repo_tab_family($tab) repository]]
+				append label " (+[expr {$count - 1}])"
+			}
+			if {[.repotabs tab $tab -text] ne $label} { .repotabs tab $tab -text $label }
+			if {!$collapsed || $tab eq $representative} {
+				if {[.repotabs tab $tab -state] ne "normal"} { .repotabs tab $tab -state normal }
+			} else {
+				if {[.repotabs tab $tab -state] ne "hidden"} { .repotabs hide $tab }
+			}
+		}
+		set image_state [list [expr {$count > 1}] $collapsed]
+		if {[info exists repo_tab_image_state($family)] &&
+			$repo_tab_image_state($family) eq $image_state} continue
+		set image $repo_tab_images($family)
+		set color [format "#%02x%02x%02x" {*}[$image get 0 0]]
+		$image put $color -to 0 0 22 18
+		if {$count > 1} {
+			$image put white -to 5 8 17 10
+			if {$collapsed} { $image put white -to 10 3 12 15 }
+		}
+		set repo_tab_image_state($family) $image_state
+	}
+	set states [list [expr {$expandable > $expanded ? "normal" : "disabled"}] \
+		[expr {$expanded > 0 ? "normal" : "disabled"}]]
+	if {![info exists repo_tab_all_states] || $states ne $repo_tab_all_states} {
+		set repo_tab_all_states $states
+		foreach action {expand collapse} state $states {
+			if {[winfo exists .group_$action]} { .group_$action configure -state $state }
+		}
+	}
+}
+
+proc repo_tab_set_all {collapsed} {
+	global repo_tab_collapsed
+	repo_tab_hide_tooltip
+	foreach family [array names repo_tab_collapsed] { set repo_tab_collapsed($family) $collapsed }
+	repo_tab_refresh_groups
+}
+
+proc repo_tab_all_tooltip {action} {
+	global repo_tab_hover_timer
+	repo_tab_hide_tooltip
+	if {$action eq "expand"} {
+		set text [mc "Expand All Repository Groups"]
+	} else {
+		set text [mc "Collapse All Repository Groups"]
+	}
+	set repo_tab_hover_timer [after 600 [list repo_tab_present_tooltip $text]]
+}
+
+proc repo_tab_toggle_at {x y} {
+	global repo_tab_family repo_tab_collapsed
+	if {[catch {.repotabs index @$x,$y} index]} { return 0 }
+	set tab [lindex [.repotabs tabs] $index]
+	if {![info exists repo_tab_family($tab)]} { return 0 }
+	if {[.repotabs identify $x $y] ne "label"} { return 0 }
+	set left $x
+	while {$left > 0 && [.repotabs identify [expr {$left - 1}] $y] eq "label"} {
+		if {[catch {.repotabs index @[expr {$left - 1}],$y} previous] || $previous != $index} break
+		incr left -1
+	}
+	if {$x - $left >= 22} { return 0 }
+	set family [dict get $repo_tab_family($tab) family]
+	set count 0
+	foreach member [.repotabs tabs] {
+		if {[info exists repo_tab_family($member)] &&
+			[dict get $repo_tab_family($member) family] eq $family} { incr count }
+	}
+	if {$count < 2} { return 0 }
+	set repo_tab_collapsed($family) [expr {!$repo_tab_collapsed($family)}]
+	repo_tab_refresh_groups
+	return 1
+}
+
+proc repo_tab_label {main worktree name} {
+	set same_path [expr {[file normalize $worktree] eq $main}]
+	if {[is_Windows]} { set same_path [string equal -nocase [file normalize $worktree] $main] }
+	set label [file tail $main]
+	if {!$same_path} {
+		if {[string first "$label-" $name] == 0} {
+			set name [string range $name [expr {[string length $label] + 1}] end]
+		}
+		set label $name
+	}
+	return $label
+}
+
+proc repo_tab_discover {family gitdir} {
+	global repo_tab_family repo_tab_main repo_tab_discovery
+	unset -nocomplain repo_tab_discovery($family)
+	set members {}
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_family($tab)] &&
+			[dict get $repo_tab_family($tab) family] eq $family} { lappend members $tab }
+	}
+	if {[llength $members] == 0} return
+	if {[catch {set listing [git --git-dir=$gitdir worktree list --porcelain -z]}]} return
+	set first [lindex [split $listing "\0"] 0]
+	if {![string match "worktree *" $first]} return
+	set main [file normalize [string range $first 9 end]]
+	set repo_tab_main($family) $main
+	foreach tab $members {
+		set metadata $repo_tab_family($tab)
+		dict set metadata repository $main
+		dict set metadata label [repo_tab_label $main [dict get $metadata path] [dict get $metadata name]]
+		set repo_tab_family($tab) $metadata
+		if {[winfo exists $tab.repository]} {
+			set path $main
+			if {[is_Windows]} { set path [file nativename $path] }
+			$tab.repository configure -text [mc "Repository: %s" $path]
+		}
+	}
+	repo_tab_refresh_groups
+}
+
+proc repo_tab_add {widget gitdir worktree name} {
+	global repo_tab_family repo_tab_main repo_tab_discovery
+	set common $gitdir
+	if {[file exists [file join $gitdir commondir]]} {
+		if {[catch {
+			set common_file [open [file join $gitdir commondir] r]
+			try {
+				set common [file normalize [file join $gitdir [string trim [read $common_file]]]]
+			} finally {
+				close $common_file
+			}
+		}]} { set common $gitdir }
+	}
+	set family $common
+	if {[is_Windows]} { set family [string tolower $family] }
+	set main $worktree
+	if {[info exists repo_tab_main($family)]} {
+		set main $repo_tab_main($family)
+	} elseif {[file tail $common] eq ".git"} {
+		set main [file dirname $common]
+	}
+	set label [repo_tab_label $main $worktree $name]
+	set neighbor {}
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_family($tab)] &&
+			[dict get $repo_tab_family($tab) family] eq $family} {
+			set neighbor $tab
+		}
+	}
+	set repo_tab_family($widget) [dict create family $family gitdir $gitdir path $worktree label $label repository $main name $name]
+	.repotabs add $widget -text $label -image [repo_tab_decorate $family] -compound left
+	if {$neighbor ne {}} {
+		.repotabs insert [expr {[.repotabs index $neighbor] + 1}] $widget
+	}
+	repo_tab_refresh_groups
+	if {![info exists repo_tab_main($family)] && ![info exists repo_tab_discovery($family)]} {
+		set repo_tab_discovery($family) [after idle [list after 0 [list repo_tab_discover $family $gitdir]]]
+	}
+}
+
+proc repo_tab_hide_tooltip {} {
+	global repo_tab_hover repo_tab_hover_timer
+	if {$repo_tab_hover_timer ne {}} { after cancel $repo_tab_hover_timer }
+	set repo_tab_hover_timer {}
+	set repo_tab_hover {}
+	if {[winfo exists .repo_tab_tooltip]} { wm withdraw .repo_tab_tooltip }
+}
+
+proc repo_tab_present_tooltip {text} {
+	set tooltip .repo_tab_tooltip
+	if {![winfo exists $tooltip]} {
+		toplevel $tooltip -borderwidth 1
+		wm withdraw $tooltip
+		wm overrideredirect $tooltip 1
+		wm transient $tooltip .
+		catch {wm attributes $tooltip -type tooltip}
+		ttk::label $tooltip.text -padding 6
+		pack $tooltip.text
+	}
+	$tooltip.text configure -text $text
+	update idletasks
+	set x [expr {min([winfo pointerx .] + 12,
+		[winfo screenwidth .] - [winfo reqwidth $tooltip])}]
+	set y [expr {min([winfo pointery .] + 20,
+		[winfo screenheight .] - [winfo reqheight $tooltip])}]
+	wm geometry $tooltip +[expr {max(0, $x)}]+[expr {max(0, $y)}]
+	wm deiconify $tooltip
+}
+
+proc repo_tab_show_tooltip {tab} {
+	global repo_tab_family repo_tab_hover_timer
+	set repo_tab_hover_timer {}
+	if {![winfo exists $tab] || ![info exists repo_tab_family($tab)]} return
+	set metadata $repo_tab_family($tab)
+	set gitdir [dict get $metadata gitdir]
+	set branch {}
+	if {![catch {set head_file [open [file join $gitdir HEAD] r]}]} {
+		try {
+			set head [string trim [read $head_file 4096]]
+			if {![regexp {^ref: refs/heads/(.+)$} $head -> branch]} {
+				if {[regexp {^[[:xdigit:]]+$} $head]} { set branch [string range $head 0 6] }
+			}
+		} finally {
+			close $head_file
+		}
+	}
+	set path [dict get $metadata path]
+	if {[is_Windows]} { set path [file nativename $path] }
+	set text "$path\n$branch"
+	set family [dict get $metadata family]
+	set count 0
+	foreach member [.repotabs tabs] {
+		if {[info exists repo_tab_family($member)] &&
+			[dict get $repo_tab_family($member) family] eq $family} { incr count }
+	}
+	if {$count > 1} {
+		if {$::repo_tab_collapsed($family)} {
+			append text "\n" [mc "Expand repository group"]
+		} else {
+			append text "\n" [mc "Collapse repository group"]
+		}
+	}
+	repo_tab_present_tooltip $text
+}
+
+proc repo_tab_motion {x y} {
+	global repo_tab_hover repo_tab_hover_timer
+	if {[catch {.repotabs index @$x,$y} index]} {
+		repo_tab_hide_tooltip
+		return
+	}
+	set tab [lindex [.repotabs tabs] $index]
+	if {$tab eq $repo_tab_hover} return
+	repo_tab_hide_tooltip
+	set repo_tab_hover $tab
+	set repo_tab_hover_timer [after 600 [list repo_tab_show_tooltip $tab]]
+}
+bind .repotabs <Motion> {repo_tab_motion %x %y}
+bind .repotabs <Leave> repo_tab_hide_tooltip
+bind .repotabs <ButtonPress> repo_tab_hide_tooltip
+
+ttk::frame .repotabs.repo0
+repo_tab_add .repotabs.repo0 $_gitdir $_gitworktree $_reponame
+
+# Build one repository's entire UI under tab frame $w. Every panel sets its ui_*
+# path globals relative to $w, so switching repoctx to a repo repoints all the
+# shared logic at that tab's widgets. Wrapped as a proc so more repos can open in
+# new tabs; inner proc defs simply redefine the global helpers harmlessly.
+proc build_repo_ui {w} {
+	global ui_w ui_vpane ui_vpane_files ui_index ui_workdir ui_diff
+	set repository [dict get $::repo_tab_family($w) repository]
+	if {[is_Windows]} { set repository [file nativename $repository] }
+	ttk::label $w.repository -text [mc "Repository: %s" $repository] -anchor w
+	pack $w.repository -side top -fill x -padx 5 -pady 2
+	set ui_w $w
+	set ui_vpane $w.vpane
+	set ui_vpane_files $ui_vpane.files
+
+build_branch_control $ui_w.branch
+
+ttk::panedwindow $ui_vpane -orient horizontal
+ttk::panedwindow $ui_vpane_files -orient vertical
+$ui_vpane add $ui_vpane_files
+pack $ui_vpane -anchor n -side top -fill both -expand 1
+
+# -- Working Directory and Index File Lists
 #
-textframe .vpane.files.index -height 100 -width 200
-tlabel .vpane.files.index.title \
-	-text [mc "Staged Changes (Will Commit)"] \
-	-background lightgreen -foreground black
-ttext $ui_index \
-	-borderwidth 0 \
-	-width 20 -height 10 \
-	-wrap none \
-	-takefocus 1 -highlightthickness 1\
-	-cursor $cursor_ptr \
-	-xscrollcommand {.vpane.files.index.sx set} \
-	-yscrollcommand {.vpane.files.index.sy set} \
-	-state disabled
-ttk::scrollbar .vpane.files.index.sx -orient h -command [list $ui_index xview]
-ttk::scrollbar .vpane.files.index.sy -orient v -command [list $ui_index yview]
-pack .vpane.files.index.title -side top -fill x
-pack .vpane.files.index.sx -side bottom -fill x
-pack .vpane.files.index.sy -side right -fill y
-pack $ui_index -side left -fill both -expand 1
+# Multi-repo fork spike: both panes are built by a proc that takes an arbitrary
+# parent $w and points the ui_workdir/ui_index path globals at it. In a fork $w
+# is each repo's tab frame; here it is the shared .vpane.files. The rest of the
+# code reaches these widgets only through the ui_* globals, so this is all that
+# is needed to make the file lists per-repo.
+proc build_file_lists {w} {
+	global ui_workdir ui_index cursor_ptr
+	set ui_workdir $w.workdir.list
+	set ui_index   $w.index.list
 
-# -- Insert the workdir and index into the panes
-#
-.vpane.files add .vpane.files.workdir
-.vpane.files add .vpane.files.index
+	textframe $w.workdir -height 100 -width 200
+	tlabel $w.workdir.title -text [mc "Unstaged Changes"] \
+		-background lightsalmon -foreground black
+	ttext $ui_workdir \
+		-borderwidth 0 \
+		-width 20 -height 10 \
+		-wrap none \
+		-takefocus 1 -highlightthickness 1\
+		-cursor $cursor_ptr \
+		-xscrollcommand [list $w.workdir.sx set] \
+		-yscrollcommand [list $w.workdir.sy set] \
+		-state disabled
+	ttk::scrollbar $w.workdir.sx -orient h -command [list $ui_workdir xview]
+	ttk::scrollbar $w.workdir.sy -orient v -command [list $ui_workdir yview]
+	pack $w.workdir.title -side top -fill x
+	pack $w.workdir.sx -side bottom -fill x
+	pack $w.workdir.sy -side right -fill y
+	pack $ui_workdir -side left -fill both -expand 1
+
+	textframe $w.index -height 100 -width 200
+	tlabel $w.index.title \
+		-text [mc "Staged Changes (Will Commit)"] \
+		-background lightgreen -foreground black
+	ttext $ui_index \
+		-borderwidth 0 \
+		-width 20 -height 10 \
+		-wrap none \
+		-takefocus 1 -highlightthickness 1\
+		-cursor $cursor_ptr \
+		-xscrollcommand [list $w.index.sx set] \
+		-yscrollcommand [list $w.index.sy set] \
+		-state disabled
+	ttk::scrollbar $w.index.sx -orient h -command [list $ui_index xview]
+	ttk::scrollbar $w.index.sy -orient v -command [list $ui_index yview]
+	pack $w.index.title -side top -fill x
+	pack $w.index.sx -side bottom -fill x
+	pack $w.index.sy -side right -fill y
+	pack $ui_index -side left -fill both -expand 1
+
+	$w add $w.workdir
+	$w add $w.index
+}
+build_file_lists $ui_vpane_files
+
+foreach _pw [list $ui_vpane $ui_vpane_files] {
+	bind $_pw <ButtonPress-1>   {autosize_press %W}
+	bind $_pw <ButtonRelease-1> {autosize_release %W}
+	bind $_pw <Double-Button-1> [list autosize_unpin %W $ui_vpane_files]
+}
+unset _pw
+bind $ui_vpane_files <Configure> [list autosize_schedule $ui_vpane_files]
 
 proc set_selection_colors {w has_focus} {
 	foreach tag [list in_diff in_sel] {
@@ -3171,80 +4182,34 @@ foreach i [list $ui_index $ui_workdir] {
 	set_selection_colors $i 0
 	bind $i <FocusIn>	{ set_selection_colors %W 1 }
 	bind $i <FocusOut>	{ set_selection_colors %W 0 }
+	bind $i <Button-1>         { toggle_or_diff click %W %x %y; break }
+	bind $i <$::M1B-Button-1>  { add_one_to_selection %W %x %y; break }
+	bind $i <Shift-Button-1>   { add_range_to_selection %W %x %y; break }
+	bind $i <Key-Up>           { toggle_or_diff up %W; break }
+	bind $i <Key-Down>         { toggle_or_diff down %W; break }
+	set ::file_lists_last_clicked($i) {}
+	set ::file_lists($i) [list]
 }
 unset i
 
 # -- Diff and Commit Area
 #
-ttk::panedwindow .vpane.lower -orient vertical
-ttk::frame .vpane.lower.commarea
-ttk::frame .vpane.lower.diff -relief sunken -borderwidth 1 -height 500
-.vpane.lower add .vpane.lower.diff
-.vpane.lower add .vpane.lower.commarea
-.vpane add .vpane.lower
-.vpane.lower pane .vpane.lower.diff -weight 1
-.vpane.lower pane .vpane.lower.commarea -weight 0
+ttk::panedwindow $ui_vpane.lower -orient vertical
+ttk::frame $ui_vpane.lower.commarea
+ttk::frame $ui_vpane.lower.diff -relief sunken -borderwidth 1 -height 500
+$ui_vpane.lower add $ui_vpane.lower.diff
+$ui_vpane.lower add $ui_vpane.lower.commarea
+$ui_vpane add $ui_vpane.lower
+$ui_vpane.lower pane $ui_vpane.lower.diff -weight 1
+$ui_vpane.lower pane $ui_vpane.lower.commarea -weight 0
 
-# -- Commit Area Buttons
+# -- Commit Area Buttons and Message Buffer
 #
-ttk::frame .vpane.lower.commarea.buttons
-ttk::label .vpane.lower.commarea.buttons.l -text {} \
-	-anchor w \
-	-justify left
-pack .vpane.lower.commarea.buttons.l -side top -fill x
-pack .vpane.lower.commarea.buttons -side left -fill y
-
-ttk::button .vpane.lower.commarea.buttons.rescan -text [mc Rescan] \
-	-command ui_do_rescan
-pack .vpane.lower.commarea.buttons.rescan -side top -fill x
-lappend disable_on_lock \
-	{.vpane.lower.commarea.buttons.rescan conf -state}
-
-ttk::button .vpane.lower.commarea.buttons.incall -text [mc "Stage Changed"] \
-	-command do_add_all
-pack .vpane.lower.commarea.buttons.incall -side top -fill x
-lappend disable_on_lock \
-	{.vpane.lower.commarea.buttons.incall conf -state}
-
-if {![is_enabled nocommitmsg]} {
-	ttk::button .vpane.lower.commarea.buttons.signoff -text [mc "Sign Off"] \
-		-command do_signoff
-	pack .vpane.lower.commarea.buttons.signoff -side top -fill x
-}
-
-ttk::button .vpane.lower.commarea.buttons.commit -text [commit_btn_caption] \
-	-command do_commit
-pack .vpane.lower.commarea.buttons.commit -side top -fill x
-lappend disable_on_lock \
-	{.vpane.lower.commarea.buttons.commit conf -state}
-
-if {![is_enabled nocommit]} {
-	ttk::button .vpane.lower.commarea.buttons.push -text [mc Push] \
-		-command do_push_anywhere
-	pack .vpane.lower.commarea.buttons.push -side top -fill x
-}
-
-# -- Commit Message Buffer
-#
-ttk::frame .vpane.lower.commarea.buffer
-ttk::frame .vpane.lower.commarea.buffer.header
-set ui_comm .vpane.lower.commarea.buffer.frame.t
-set ui_coml .vpane.lower.commarea.buffer.header.l
-
-if {![is_enabled nocommit]} {
-	ttk::checkbutton .vpane.lower.commarea.buffer.header.amend \
-		-text [mc "Amend Last Commit"] \
-		-variable commit_type_is_amend \
-		-command do_select_commit_type
-	lappend disable_on_lock \
-		[list .vpane.lower.commarea.buffer.header.amend conf -state]
-}
-
-ttk::label $ui_coml \
-	-anchor w \
-	-justify left
+# Multi-repo fork spike: built under an arbitrary parent $w with ui_comm/ui_coml/
+# ui_comm_ctxm pointed at it; trace_commit_type updates the active tab's label.
 proc trace_commit_type {varname args} {
-	global ui_coml commit_type
+	global ui_coml commit_type commit_author
+	if {$ui_coml eq {} || ![winfo exists $ui_coml]} return
 	switch -glob -- $commit_type {
 	initial       {set txt [mc "Initial Commit Message:"]}
 	amend         {set txt [mc "Amended Commit Message:"]}
@@ -3253,79 +4218,147 @@ proc trace_commit_type {varname args} {
 	merge         {set txt [mc "Merge Commit Message:"]}
 	*             {set txt [mc "Commit Message:"]}
 	}
+	if {[string match amend* $commit_type] && [info exists commit_author]
+		&& [llength $commit_author] == 6} {
+		append txt "   " [mc "Author:"] " " \
+			[dict get $commit_author name] \
+			" <[dict get $commit_author email]>"
+	}
 	$ui_coml conf -text $txt
 }
-trace add variable commit_type write trace_commit_type
-pack $ui_coml -side left -fill x
 
-if {![is_enabled nocommit]} {
-	pack .vpane.lower.commarea.buffer.header.amend -side right
-}
+proc build_commit_area {w} {
+	global ui_comm ui_coml ui_comm_ctxm disable_on_lock repo_config ui_commarea
+	set ui_commarea $w
 
-textframe .vpane.lower.commarea.buffer.frame
-ttext $ui_comm \
-	-borderwidth 1 \
-	-undo true \
-	-maxundo 20 \
-	-autoseparators true \
-	-takefocus 1 \
-	-highlightthickness 1 \
-	-relief sunken \
-	-width $repo_config(gui.commitmsgwidth) -height 9 -wrap none \
-	-font font_diff \
-	-xscrollcommand {.vpane.lower.commarea.buffer.frame.sbx set} \
-	-yscrollcommand {.vpane.lower.commarea.buffer.frame.sby set}
-ttk::scrollbar .vpane.lower.commarea.buffer.frame.sbx \
-	-orient horizontal \
-	-command [list $ui_comm xview]
-ttk::scrollbar .vpane.lower.commarea.buffer.frame.sby \
-	-orient vertical \
-	-command [list $ui_comm yview]
+	ttk::frame $w.buttons
+	ttk::label $w.buttons.l -text {} \
+		-anchor w \
+		-justify left
+	pack $w.buttons.l -side top -fill x
+	pack $w.buttons -side left -fill y
 
-pack .vpane.lower.commarea.buffer.frame.sbx -side bottom -fill x
-pack .vpane.lower.commarea.buffer.frame.sby -side right -fill y
-pack $ui_comm -side left -fill y
-pack .vpane.lower.commarea.buffer.header -side top -fill x
-pack .vpane.lower.commarea.buffer.frame -side left -fill y
-pack .vpane.lower.commarea.buffer -side left -fill y
+	ttk::button $w.buttons.rescan -text [mc Rescan] \
+		-command ui_do_rescan
+	pack $w.buttons.rescan -side top -fill x
+	lappend disable_on_lock [list $w.buttons.rescan conf -state]
 
-# -- Commit Message Buffer Context Menu
-#
-set ctxm .vpane.lower.commarea.buffer.ctxm
-menu $ctxm -tearoff 0
-$ctxm add command \
-	-label [mc Cut] \
-	-command {tk_textCut $ui_comm}
-$ctxm add command \
-	-label [mc Copy] \
-	-command {tk_textCopy $ui_comm}
-$ctxm add command \
-	-label [mc Paste] \
-	-command {tk_textPaste $ui_comm}
-$ctxm add command \
-	-label [mc Delete] \
-	-command {catch {$ui_comm delete sel.first sel.last}}
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Select All"] \
-	-command {focus $ui_comm;$ui_comm tag add sel 0.0 end}
-$ctxm add command \
-	-label [mc "Copy All"] \
-	-command {
-		$ui_comm tag add sel 0.0 end
-		tk_textCopy $ui_comm
-		$ui_comm tag remove sel 0.0 end
+	ttk::button $w.buttons.incall -text [mc "Stage Changed"] \
+		-command do_add_all
+	pack $w.buttons.incall -side top -fill x
+	lappend disable_on_lock [list $w.buttons.incall conf -state]
+
+	if {![is_enabled nocommitmsg]} {
+		ttk::button $w.buttons.signoff -text [mc "Sign Off"] \
+			-command do_signoff
+		pack $w.buttons.signoff -side top -fill x
 	}
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Sign Off"] \
-	-command do_signoff
-set ui_comm_ctxm $ctxm
+
+	ttk::button $w.buttons.commit -text [commit_btn_caption] \
+		-command do_commit
+	pack $w.buttons.commit -side top -fill x
+	lappend disable_on_lock [list $w.buttons.commit conf -state]
+
+	if {![is_enabled nocommit]} {
+		ttk::button $w.buttons.push -text [mc Push] \
+			-command do_push_anywhere
+		pack $w.buttons.push -side top -fill x
+	}
+
+	ttk::frame $w.buffer
+	ttk::frame $w.buffer.header
+	set ui_comm $w.buffer.frame.t
+	set ui_coml $w.buffer.header.l
+
+	if {![is_enabled nocommit]} {
+		ttk::checkbutton $w.buffer.header.amend \
+			-text [mc "Amend Last Commit"] \
+			-variable commit_type_is_amend \
+			-command do_select_commit_type
+		lappend disable_on_lock \
+			[list $w.buffer.header.amend conf -state]
+	}
+
+	ttk::label $ui_coml \
+		-anchor w \
+		-justify left
+	pack $ui_coml -side left -fill x
+
+	if {![is_enabled nocommit]} {
+		pack $w.buffer.header.amend -side right
+	}
+
+	textframe $w.buffer.frame
+	ttext $ui_comm \
+		-borderwidth 1 \
+		-undo true \
+		-maxundo 20 \
+		-autoseparators true \
+		-takefocus 1 \
+		-highlightthickness 1 \
+		-relief sunken \
+		-width $repo_config(gui.commitmsgwidth) -height 9 -wrap none \
+		-font font_diff \
+		-xscrollcommand [list $w.buffer.frame.sbx set] \
+		-yscrollcommand [list $w.buffer.frame.sby set]
+	ttk::scrollbar $w.buffer.frame.sbx \
+		-orient horizontal \
+		-command [list $ui_comm xview]
+	ttk::scrollbar $w.buffer.frame.sby \
+		-orient vertical \
+		-command [list $ui_comm yview]
+
+	pack $w.buffer.frame.sbx -side bottom -fill x
+	pack $w.buffer.frame.sby -side right -fill y
+	pack $ui_comm -side left -fill y
+	pack $w.buffer.header -side top -fill x
+	pack $w.buffer.frame -side left -fill y
+	pack $w.buffer -side left -fill y
+
+	set ctxm $w.buffer.ctxm
+	menu $ctxm -tearoff 0
+	$ctxm add command \
+		-label [mc Cut] \
+		-command {tk_textCut $ui_comm}
+	$ctxm add command \
+		-label [mc Copy] \
+		-command {tk_textCopy $ui_comm}
+	$ctxm add command \
+		-label [mc Paste] \
+		-command {tk_textPaste $ui_comm}
+	$ctxm add command \
+		-label [mc Delete] \
+		-command {catch {$ui_comm delete sel.first sel.last}}
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Select All"] \
+		-command {focus $ui_comm;$ui_comm tag add sel 0.0 end}
+	$ctxm add command \
+		-label [mc "Copy All"] \
+		-command {
+			$ui_comm tag add sel 0.0 end
+			tk_textCopy $ui_comm
+			$ui_comm tag remove sel 0.0 end
+		}
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Sign Off"] \
+		-command do_signoff
+	set ui_comm_ctxm $ctxm
+}
+build_commit_area $ui_vpane.lower.commarea
+if {![info exists ::_gg_trace_ct]} {
+	set ::_gg_trace_ct 1
+	trace add variable ::commit_type write trace_commit_type
+}
 
 # -- Diff Header
 #
+# Multi-repo fork spike: the header frame path is stored in ui_diff_hdr and the
+# labels live under it, so the trace updates the active tab's diff header.
 proc trace_current_diff_path {varname args} {
-	global current_diff_path diff_actions file_states
+	global current_diff_path diff_actions file_states _gitworktree ui_diff_hdr
+	if {$ui_diff_hdr eq {} || ![winfo exists $ui_diff_hdr.status]} return
 	if {$current_diff_path eq {}} {
 		set s {}
 		set f {}
@@ -3335,134 +4368,263 @@ proc trace_current_diff_path {varname args} {
 		set p $current_diff_path
 		set s [mapdesc [lindex $file_states($p) 0] $p]
 		set f [mc "File:"]
-		set p [escape_path $p]
+		set p [escape_path [file nativename [file join $_gitworktree $p]]]
 		set o normal
 	}
 
-	.vpane.lower.diff.header.status configure -text $s
-	.vpane.lower.diff.header.file configure -text $f
-	.vpane.lower.diff.header.path configure -text $p
+	$ui_diff_hdr.status configure -text $s
+	$ui_diff_hdr.file configure -text $f
+	$ui_diff_hdr.path configure -text $p
 	foreach w $diff_actions {
 		uplevel #0 $w $o
 	}
 }
-trace add variable current_diff_path write trace_current_diff_path
+if {![info exists ::_gg_trace_cdp]} {
+	set ::_gg_trace_cdp 1
+	trace add variable ::current_diff_path write trace_current_diff_path
+}
 
-gold_frame .vpane.lower.diff.header
-tlabel .vpane.lower.diff.header.status \
-	-background gold \
-	-foreground black \
-	-width $max_status_desc \
-	-anchor w \
-	-justify left
-tlabel .vpane.lower.diff.header.file \
-	-background gold \
-	-foreground black \
-	-anchor w \
-	-justify left
-tlabel .vpane.lower.diff.header.path \
-	-background gold \
-	-foreground blue \
-	-anchor w \
-	-justify left \
-	-font [eval font create [font configure font_ui] -underline 1] \
-	-cursor hand2
-pack .vpane.lower.diff.header.status -side left
-pack .vpane.lower.diff.header.file -side left
-pack .vpane.lower.diff.header.path -fill x
-set ctxm .vpane.lower.diff.header.ctxm
-menu $ctxm -tearoff 0
-$ctxm add command \
-	-label [mc Copy] \
-	-command {
+proc copy_diff_path_unix {} {
+	global _gitworktree current_diff_path
+	clipboard clear
+	clipboard append -format STRING -type STRING \
+		-- [file join $_gitworktree $current_diff_path]
+}
+
+proc build_diff_header {w} {
+	global ui_diff_hdr max_status_desc diff_actions
+	set ui_diff_hdr $w.header
+	gold_frame $w.header
+	tlabel $w.header.status \
+		-background gold \
+		-foreground black \
+		-width $max_status_desc \
+		-anchor w \
+		-justify left
+	tlabel $w.header.file \
+		-background gold \
+		-foreground black \
+		-anchor w \
+		-justify left
+	tlabel $w.header.path \
+		-background gold \
+		-foreground blue \
+		-anchor w \
+		-justify left \
+		-font [eval font create [font configure font_ui] -underline 1] \
+		-cursor hand2
+	pack $w.header.status -side left
+	pack $w.header.file -side left
+	ttk::button $w.header.next -text [mc "Next Change"] \
+		-takefocus 0 -command {diff_goto_change 1}
+	ttk::button $w.header.prev -text [mc "Previous Change"] \
+		-takefocus 0 -command {diff_goto_change -1}
+	pack $w.header.next -side right -padx 2
+	pack $w.header.prev -side right -padx 2
+	pack $w.header.path -fill x
+	set ctxm $w.header.ctxm
+	menu $ctxm -tearoff 0
+	$ctxm add command \
+		-label [mc "Copy Path"] \
+		-command {
+			clipboard clear
+			clipboard append \
+				-format STRING \
+				-type STRING \
+				-- [file nativename [file join $_gitworktree $current_diff_path]]
+		}
+	$ctxm add command \
+		-label [mc "Copy Unix Path"] \
+		-command {copy_diff_path_unix}
+	$ctxm add command \
+		-label [mc Open] \
+		-command {do_file_open $current_diff_path}
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Open in Azure DevOps"] \
+		-command {do_ado_open $current_diff_path}
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add command \
+		-label [mc "Copy Azure DevOps Link"] \
+		-command {do_ado_copy $current_diff_path}
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	bind_button3 $w.header.path "tk_popup $ctxm %X %Y"
+	bind $w.header.path <Button-1> {do_file_open $current_diff_path}
+	bind $w.header.path <Button-2> {
 		clipboard clear
 		clipboard append \
 			-format STRING \
 			-type STRING \
-			-- $current_diff_path
+			-- [file nativename [file join $_gitworktree $current_diff_path]]
 	}
-$ctxm add command \
-	-label [mc Open] \
-	-command {do_file_open $current_diff_path}
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-bind_button3 .vpane.lower.diff.header.path "tk_popup $ctxm %X %Y"
-bind .vpane.lower.diff.header.path <Button-1> {do_file_open $current_diff_path}
+	bind $w.header.path <Double-Button-2> {copy_diff_path_unix}
+}
+build_diff_header $ui_vpane.lower.diff
 
 # -- Diff Body
 #
-textframe .vpane.lower.diff.body
-set ui_diff .vpane.lower.diff.body.t
-ttext $ui_diff \
-	-borderwidth 0 \
-	-width 80 -height 5 -wrap none \
-	-font font_diff \
-	-takefocus 1 -highlightthickness 1 \
-	-xscrollcommand {.vpane.lower.diff.body.sbx set} \
-	-yscrollcommand {.vpane.lower.diff.body.sby set} \
-	-state disabled
-catch {$ui_diff configure -tabstyle wordprocessor}
-ttk::scrollbar .vpane.lower.diff.body.sbx -orient horizontal \
-	-command [list $ui_diff xview]
-ttk::scrollbar .vpane.lower.diff.body.sby -orient vertical \
-	-command [list $ui_diff yview]
-pack .vpane.lower.diff.body.sbx -side bottom -fill x
-pack .vpane.lower.diff.body.sby -side right -fill y
-pack $ui_diff -side left -fill both -expand 1
-pack .vpane.lower.diff.header -side top -fill x
-pack .vpane.lower.diff.body -side bottom -fill both -expand 1
-
-foreach {n c} {0 black 1 red4 2 green4 3 yellow4 4 blue4 5 magenta4 6 cyan4 7 grey60} {
-	$ui_diff tag configure clr4$n -background $c
-	$ui_diff tag configure clri4$n -foreground $c
-	$ui_diff tag configure clr3$n -foreground $c
-	$ui_diff tag configure clri3$n -background $c
+# Multi-repo fork spike: the line-number + diff text widgets are built by a proc
+# under an arbitrary parent $w, pointing ui_diff/ui_diff_ln at it. The scroll
+# helpers derive their sibling widgets from the owning diff widget.
+proc diff_yscrollcmd {diff finder args} {
+	if {![winfo exists $diff]} return
+	set body [winfo parent $diff]
+	if {![winfo exists $body.sby] || ![winfo exists $body.ln]} return
+	eval $body.sby set $args
+	$body.ln yview moveto [lindex $args 0]
+	catch {::searchbar::scrolled $finder}
 }
-$ui_diff tag configure clr1 -font font_diffbold
-$ui_diff tag configure clr4 -underline 1
+proc diff_show_finder {} {
+	global ui_diff_finder
+	catch {::searchbar::show $ui_diff_finder}
+}
+proc diff_yview {diff args} {
+	if {![winfo exists $diff]} return
+	set body [winfo parent $diff]
+	if {![winfo exists $body.ln]} return
+	eval $diff yview $args
+	$body.ln yview moveto [lindex [$diff yview] 0]
+}
 
-$ui_diff tag conf d_info -foreground blue -font font_diffbold
-$ui_diff tag conf d_rescan -foreground blue -underline 1 -font font_diffbold
-$ui_diff tag bind d_rescan <Button-1> { clear_diff; rescan ui_ready 0 }
+proc build_diff_body {w} {
+	global ui_diff ui_diff_ln ui_diff_finder
+	set ui_diff_ln $w.body.ln
+	set ui_diff    $w.body.t
 
-$ui_diff tag conf d_cr -elide true
-$ui_diff tag conf d_@ -font font_diffbold
-$ui_diff tag conf d_+ -foreground {#00a000}
-$ui_diff tag conf d_- -foreground red
+	textframe $w.body
+	text $ui_diff_ln \
+		-borderwidth 0 \
+		-width 11 -height 5 -wrap none \
+		-font font_diff \
+		-state disabled \
+		-takefocus 0 \
+		-highlightthickness 0 \
+		-background #f0f0f0 \
+		-foreground #888888 \
+		-padx 4 \
+		-cursor {}
+	bind $ui_diff_ln <MouseWheel> \
+		"[list diff_yview $ui_diff] scroll \[expr {-%D/120}\] units; break"
+	bind $ui_diff_ln <Button-4> [list diff_yview $ui_diff scroll -1 units]\;break
+	bind $ui_diff_ln <Button-5> [list diff_yview $ui_diff scroll 1 units]\;break
 
-$ui_diff tag conf d_++ -foreground {#00a000}
-$ui_diff tag conf d_-- -foreground red
-$ui_diff tag conf d_+s \
-	-foreground {#00a000} \
-	-background {#e2effa}
-$ui_diff tag conf d_-s \
-	-foreground red \
-	-background {#e2effa}
-$ui_diff tag conf d_s+ \
-	-foreground {#00a000} \
-	-background ivory1
-$ui_diff tag conf d_s- \
-	-foreground red \
-	-background ivory1
+	ttext $ui_diff \
+		-borderwidth 0 \
+		-width 80 -height 5 -wrap none \
+		-font font_diff \
+		-takefocus 1 -highlightthickness 1 \
+		-xscrollcommand [list $w.body.sbx set] \
+		-yscrollcommand [list diff_yscrollcmd $ui_diff {}] \
+		-state disabled
+	catch {$ui_diff configure -tabstyle wordprocessor}
+	ttk::scrollbar $w.body.sbx -orient horizontal \
+		-command [list $ui_diff xview]
+	ttk::scrollbar $w.body.sby -orient vertical \
+		-command [list diff_yview $ui_diff]
+	# Change overview strip, packed beside the scrollbar in whole-file mode.
+	canvas $w.body.map -width 12 -highlightthickness 0 -borderwidth 0 \
+		-background #f0f0f0 -cursor {}
+	bind $w.body.map <Configure> {diff_map_draw %W}
+	bind $w.body.map <Button-1> {diff_map_click %W %y}
+	bind $w.body.map <B1-Motion> {diff_map_click %W %y}
+	pack $w.body.sbx -side bottom -fill x
+	# The search bar is grid-managed; the zero-size spacer keeps this container
+	# collapsed while the bar is hidden.
+	ttk::frame $w.body.fc
+	grid columnconfigure $w.body.fc 0 -weight 1
+	grid [ttk::frame $w.body.fc.sp] -row 1 -column 0
+	set ui_diff_finder [::searchbar::new $w.body.fc.f $ui_diff -row 0 -column 0]
+	$ui_diff configure -yscrollcommand [list diff_yscrollcmd $ui_diff $ui_diff_finder]
+	pack $w.body.fc -side bottom -fill x
+	pack $w.body.sby -side right -fill y
+	pack $ui_diff_ln -side left -fill y
+	pack $ui_diff -side left -fill both -expand 1
+	pack $w.body -side bottom -fill both -expand 1
 
-$ui_diff tag conf d< \
-	-foreground orange \
-	-font font_diffbold
-$ui_diff tag conf d| \
-	-foreground orange \
-	-font font_diffbold
-$ui_diff tag conf d= \
-	-foreground orange \
-	-font font_diffbold
-$ui_diff tag conf d> \
-	-foreground orange \
-	-font font_diffbold
+	set f $ui_diff_finder
+	set e [::searchbar::editor $f]
+	bind $ui_diff <Key-slash> [list ::searchbar::show $f]\;break
+	bind $ui_diff <$::M1B-Key-f> [list ::searchbar::show $f]\;break
+	bind $ui_diff <$::M1B-Key-F> [list ::searchbar::show $f]\;break
+	bind $ui_diff <Escape>    [list ::searchbar::hide $f]
+	bind $e <Escape>          [list ::searchbar::hide $f]\;break
+	bind $e <Key-F3>          [list ::searchbar::find_next $f]\;break
+	bind $e <Shift-Key-F3>    [list ::searchbar::find_prev $f]\;break
 
-$ui_diff tag raise sel
+	foreach {n c} {0 black 1 red4 2 green4 3 yellow4 4 blue4 5 magenta4 6 cyan4 7 grey60} {
+		$ui_diff tag configure clr4$n -background $c
+		$ui_diff tag configure clri4$n -foreground $c
+		$ui_diff tag configure clr3$n -foreground $c
+		$ui_diff tag configure clri3$n -background $c
+	}
+	$ui_diff tag configure clr1 -font font_diffbold
+	$ui_diff tag configure clr4 -underline 1
+
+	$ui_diff tag conf d_info -foreground blue -font font_diffbold
+	$ui_diff tag conf d_rescan -foreground blue -underline 1 -font font_diffbold
+	$ui_diff tag bind d_rescan <Button-1> { clear_diff; rescan ui_ready 0 }
+
+	$ui_diff tag conf d_cr -elide true
+	$ui_diff tag conf d_@ -font font_diffbold
+	$ui_diff tag conf d_+ -foreground {#00a000}
+	$ui_diff tag conf d_- -foreground red
+
+	$ui_diff tag conf d_++ -foreground {#00a000}
+	$ui_diff tag conf d_-- -foreground red
+	$ui_diff tag conf d_+s \
+		-foreground {#00a000} \
+		-background {#e2effa}
+	$ui_diff tag conf d_-s \
+		-foreground red \
+		-background {#e2effa}
+	$ui_diff tag conf d_s+ \
+		-foreground {#00a000} \
+		-background ivory1
+	$ui_diff tag conf d_s- \
+		-foreground red \
+		-background ivory1
+
+	$ui_diff tag conf d< \
+		-foreground orange \
+		-font font_diffbold
+	$ui_diff tag conf d| \
+		-foreground orange \
+		-font font_diffbold
+	$ui_diff tag conf d= \
+		-foreground orange \
+		-font font_diffbold
+	$ui_diff tag conf d> \
+		-foreground orange \
+		-font font_diffbold
+
+	$ui_diff tag conf found -background yellow
+	$ui_diff tag raise sel
+}
+pack $ui_vpane.lower.diff.header -side top -fill x
+build_diff_body $ui_vpane.lower.diff
 
 # -- Diff Body Context Menu
 #
 
 proc create_common_diff_popup {ctxm} {
+	$ctxm add command \
+		-label [mc "Next Change"] \
+		-command {diff_goto_change 1} \
+		-accelerator F3
+	$ctxm add command \
+		-label [mc "Previous Change"] \
+		-command {diff_goto_change -1} \
+		-accelerator Shift-F3
+	$ctxm add command \
+		-label [mc "Find Text..."] \
+		-command diff_show_finder \
+		-accelerator $::M1T-F
+	$ctxm add checkbutton \
+		-label [mc "Always Show Entire File"] \
+		-variable diff_whole_file_ui \
+		-command diff_whole_file_changed
+	$ctxm add separator
 	$ctxm add command \
 		-label [mc Refresh] \
 		-command reshow_diff
@@ -3505,98 +4667,105 @@ proc create_common_diff_popup {ctxm} {
 		-command do_options
 }
 
-set ctxm .vpane.lower.diff.body.ctxm
-menu $ctxm -tearoff 0
-$ctxm add command \
-	-label [mc "Apply/Reverse Hunk"] \
-	-command {apply_or_revert_hunk $cursorX $cursorY 0}
-set ui_diff_applyhunk [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_applyhunk -state]
-$ctxm add command \
-	-label [mc "Apply/Reverse Line"] \
-	-command {apply_or_revert_range_or_line $cursorX $cursorY 0; do_rescan}
-set ui_diff_applyline [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_applyline -state]
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Revert Hunk"] \
-	-command {apply_or_revert_hunk $cursorX $cursorY 1}
-set ui_diff_reverthunk [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_reverthunk -state]
-$ctxm add command \
-	-label [mc "Revert Line"] \
-	-command {apply_or_revert_range_or_line $cursorX $cursorY 1; do_rescan}
-set ui_diff_revertline [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_revertline -state]
-$ctxm add command \
-	-label [mc "Undo Last Revert"] \
-	-command {undo_last_revert; do_rescan}
-set ui_diff_undorevert [$ctxm index last]
-lappend diff_actions [list $ctxm entryconf $ui_diff_undorevert -state]
-$ctxm add separator
-$ctxm add command \
-	-label [mc "Show Less Context"] \
-	-command show_less_context
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-$ctxm add command \
-	-label [mc "Show More Context"] \
-	-command show_more_context
-lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-$ctxm add separator
-create_common_diff_popup $ctxm
+proc build_diff_menus {} {
+	global ui_diff diff_actions
+	global ui_diff_applyhunk ui_diff_applyline
+	global ui_diff_reverthunk ui_diff_revertline ui_diff_undorevert
 
-set ctxmmg .vpane.lower.diff.body.ctxmmg
-menu $ctxmmg -tearoff 0
-$ctxmmg add command \
-	-label [mc "Run Merge Tool"] \
-	-command {merge_resolve_tool}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add separator
-$ctxmmg add command \
-	-label [mc "Use Remote Version"] \
-	-command {merge_resolve_one 3}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add command \
-	-label [mc "Use Local Version"] \
-	-command {merge_resolve_one 2}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add command \
-	-label [mc "Revert To Base"] \
-	-command {merge_resolve_one 1}
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add separator
-$ctxmmg add command \
-	-label [mc "Show Less Context"] \
-	-command show_less_context
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add command \
-	-label [mc "Show More Context"] \
-	-command show_more_context
-lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
-$ctxmmg add separator
-create_common_diff_popup $ctxmmg
+	set ctxm $ui_diff.ctxm
+	menu $ctxm -tearoff 0
+	$ctxm add command \
+		-label [mc "Apply/Reverse Hunk"] \
+		-command {apply_or_revert_hunk $cursorX $cursorY 0}
+	set ui_diff_applyhunk [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_applyhunk -state]
+	$ctxm add command \
+		-label [mc "Apply/Reverse Line"] \
+		-command {apply_or_revert_range_or_line $cursorX $cursorY 0; do_rescan}
+	set ui_diff_applyline [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_applyline -state]
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Revert Hunk"] \
+		-command {apply_or_revert_hunk $cursorX $cursorY 1}
+	set ui_diff_reverthunk [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_reverthunk -state]
+	$ctxm add command \
+		-label [mc "Revert Line"] \
+		-command {apply_or_revert_range_or_line $cursorX $cursorY 1; do_rescan}
+	set ui_diff_revertline [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_revertline -state]
+	$ctxm add command \
+		-label [mc "Undo Last Revert"] \
+		-command {undo_last_revert; do_rescan}
+	set ui_diff_undorevert [$ctxm index last]
+	lappend diff_actions [list $ctxm entryconf $ui_diff_undorevert -state]
+	$ctxm add separator
+	$ctxm add command \
+		-label [mc "Show Less Context"] \
+		-command show_less_context
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add command \
+		-label [mc "Show More Context"] \
+		-command show_more_context
+	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	$ctxm add separator
+	create_common_diff_popup $ctxm
 
-set ctxmsm .vpane.lower.diff.body.ctxmsm
-menu $ctxmsm -tearoff 0
-$ctxmsm add command \
-	-label [mc "Visualize These Changes In The Submodule"] \
-	-command {do_gitk -- true}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add command \
-	-label [mc "Visualize Current Branch History In The Submodule"] \
-	-command {do_gitk {} true}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add command \
-	-label [mc "Visualize All Branch History In The Submodule"] \
-	-command {do_gitk --all true}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add separator
-$ctxmsm add command \
-	-label [mc "Start git gui In The Submodule"] \
-	-command {do_git_gui}
-lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
-$ctxmsm add separator
-create_common_diff_popup $ctxmsm
+	set ctxmmg $ui_diff.ctxmmg
+	menu $ctxmmg -tearoff 0
+	$ctxmmg add command \
+		-label [mc "Run Merge Tool"] \
+		-command {merge_resolve_tool}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add separator
+	$ctxmmg add command \
+		-label [mc "Use Remote Version"] \
+		-command {merge_resolve_one 3}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add command \
+		-label [mc "Use Local Version"] \
+		-command {merge_resolve_one 2}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add command \
+		-label [mc "Revert To Base"] \
+		-command {merge_resolve_one 1}
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add separator
+	$ctxmmg add command \
+		-label [mc "Show Less Context"] \
+		-command show_less_context
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add command \
+		-label [mc "Show More Context"] \
+		-command show_more_context
+	lappend diff_actions [list $ctxmmg entryconf [$ctxmmg index last] -state]
+	$ctxmmg add separator
+	create_common_diff_popup $ctxmmg
+
+	set ctxmsm $ui_diff.ctxmsm
+	menu $ctxmsm -tearoff 0
+	$ctxmsm add command \
+		-label [mc "Visualize These Changes In The Submodule"] \
+		-command {do_gitk -- true}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add command \
+		-label [mc "Visualize Current Branch History In The Submodule"] \
+		-command {do_gitk {} true}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add command \
+		-label [mc "Visualize All Branch History In The Submodule"] \
+		-command {do_gitk --all true}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add separator
+	$ctxmsm add command \
+		-label [mc "Start git gui In The Submodule"] \
+		-command {do_git_gui}
+	lappend diff_actions [list $ctxmsm entryconf [$ctxmsm index last] -state]
+	$ctxmsm add separator
+	create_common_diff_popup $ctxmsm
+}
+build_diff_menus
 
 proc has_textconv {path} {
 	if {[is_config_false gui.textconv]} {
@@ -3690,7 +4859,644 @@ proc popup_diff_menu {ctxm ctxmmg ctxmsm x y X Y} {
 		tk_popup $ctxm $X $Y
 	}
 }
-bind_button3 $ui_diff [list popup_diff_menu $ctxm $ctxmmg $ctxmsm %x %y %X %Y]
+bind_button3 $ui_diff [list popup_diff_menu $ui_diff.ctxm $ui_diff.ctxmmg $ui_diff.ctxmsm %x %y %X %Y]
+}
+build_repo_ui .repotabs.repo0
+
+# Map each notebook tab to its repoctx id, and on tab change swap the active
+# repo context and cd to its worktree (git-gui runs git via the process cwd).
+array set tab_ctx {}
+set tab_ctx(.repotabs.repo0) [repoctx::current]
+array set tab_path {}
+set tab_path(.repotabs.repo0) [file normalize $_gitworktree]
+# Monotonic tab-frame counter; never reused, so closing a tab can't collide with
+# a later-opened one (widget names must stay unique under .repotabs).
+set _repo_tab_seq 0
+
+# Refresh HEAD/commit_type/branch for the ACTIVE repo. These are otherwise only
+# restored from a context snapshot that can be stale -- e.g. saved as "initial"
+# or with an empty PARENT before the repo's initial rescan finished when several
+# repos open at once -- which made amend fail with "nothing to amend". An
+# in-progress amend is left untouched so it is not lost.
+proc refresh_commit_state {} {
+	global commit_type HEAD PARENT MERGE_HEAD
+	if {[string match amend* $commit_type]} return
+	if {![catch {repository_state ct hd mh}]} {
+		set HEAD $hd
+		set PARENT $hd
+		set MERGE_HEAD $mh
+		set commit_type $ct
+	}
+}
+
+proc refresh_active_commit_state {} {
+	global commit_type commit_type_is_amend
+	if {[string match amend* $commit_type]} {
+		catch {load_current_branch}
+	} else {
+		refresh_commit_state
+	}
+	# Keep the amend checkbox in sync with this tab's commit_type.
+	set commit_type_is_amend [string match amend* $commit_type]
+}
+
+# Set the main window title to the active repo (name + worktree path).
+proc set_repo_window_title {} {
+	catch {wm title . "[reponame] [file normalize $::_gitworktree]"}
+}
+
+proc on_repo_tab_changed {} {
+	global tab_ctx repo_tab_pending
+	repo_tab_refresh_groups
+	set w [.repotabs select]
+	if {$w ne {} && [info exists repo_tab_pending($w)]} {
+		if {![repo_tab_initialize $w]} {
+			foreach tab [.repotabs tabs] {
+				if {[info exists tab_ctx($tab)] && $tab_ctx($tab) eq [repoctx::current]} {
+					.repotabs select $tab
+					break
+				}
+			}
+		}
+		return
+	}
+	if {$w eq {} || ![info exists tab_ctx($w)]} return
+	if {[repoctx::current] eq $tab_ctx($w)} {
+		save_repo_tab_session
+		return
+	}
+	repoctx::use $tab_ctx($w)
+	catch {cd [repoctx::field worktree]}
+	# Refresh commit state (HEAD/commit_type/branch) for the now-active repo.
+	catch {refresh_active_commit_state}
+	catch {set_repo_window_title}
+	catch {diff_map_update}
+	catch {autosize_schedule [winfo parent [winfo parent $::ui_index]]}
+	# repo_config is now the active repo's; rebuild the shared Tools menu so
+	# per-repo guitools (e.g. includeIf gitdir entries) match the active tab.
+	if {[info exists ::tools_menubar]} { tools_populate_all }
+	save_repo_tab_session
+}
+bind .repotabs <<NotebookTabChanged>> on_repo_tab_changed
+bind .repotabs <Button-2> {close_repo_tab_at %x %y; break}
+
+proc repo_tab_list_worktrees {tab} {
+	global tab_path
+	if {![info exists tab_path($tab)]} return
+	set path $tab_path($tab)
+	if {[catch {set output [exec git -C $path worktree list]} err]} {
+		error_popup [strcat [mc "Unable to list worktrees"] ":\n\n" $err]
+		return
+	}
+	set rows {}
+	set path_width [string length [mc "Worktree Path"]]
+	set head_width [string length [mc "HEAD"]]
+	foreach line [split $output "\n"] {
+		if {$line eq {}} continue
+		if {[regexp {^(.+)\s+([[:xdigit:]]{7,64})(?:\s+(.*))?$} \
+			$line -> worktree head branch_state]} {
+			if {[regexp {^\[([^\]]+)\](.*)$} $branch_state -> branch suffix]} {
+				set branch_state "$branch$suffix"
+			}
+		} else {
+			set worktree $line
+			set head {}
+			set branch_state {}
+		}
+		if {[is_Windows]} { set worktree [file nativename $worktree] }
+		set path_width [expr {max($path_width, [string length $worktree])}]
+		set head_width [expr {max($head_width, [string length $head])}]
+		lappend rows [list $worktree $head $branch_state]
+	}
+	set row_format "%-*s  %-*s  %s"
+	set header [format $row_format $path_width [mc "Worktree Path"] \
+		$head_width [mc "HEAD"] [mc "Branch / State"]]
+	set display_output [list $header [string repeat - [string length $header]]]
+	foreach row $rows {
+		lappend display_output [format $row_format $path_width \
+			[lindex $row 0] $head_width [lindex $row 1] [lindex $row 2]]
+	}
+	repo_tab_show_worktrees $path [join $display_output "\n"] $rows
+}
+
+proc repo_tab_copy_worktrees_selection {widget} {
+	if {[catch {set selection [$widget get sel.first sel.last]}]} return
+	clipboard clear -displayof $widget
+	clipboard append -displayof $widget $selection
+}
+
+proc repo_tab_select_worktree {widget x y rows button} {
+	set index [$widget index @$x,$y]
+	set row [expr {[lindex [split $index .] 0] - 3}]
+	$widget mark set worktree_row $index
+	if {$row >= 0 && $row < [llength $rows]} {
+		$button configure -state normal
+	} else {
+		$button configure -state disabled
+	}
+}
+
+proc repo_tab_open_worktree {widget rows} {
+	global tab_path
+	set row [expr {[lindex [split [$widget index worktree_row] .] 0] - 3}]
+	if {$row < 0 || $row >= [llength $rows]} return
+	set path [lindex [lindex $rows $row] 0]
+	if {![file isdirectory $path]} {
+		error_popup [mc "Worktree directory does not exist: %s" $path]
+		return
+	}
+	set path [file normalize $path]
+	foreach tab [.repotabs tabs] {
+		if {![info exists tab_path($tab)]} continue
+		if {$tab_path($tab) eq $path ||
+			([is_Windows] && [string equal -nocase $tab_path($tab) $path])} {
+			.repotabs select $tab
+			return
+		}
+	}
+	open_repo_context $path
+}
+
+proc repo_tab_show_worktrees {path output rows} {
+	set w .repo_worktrees
+	if {[winfo exists $w]} { destroy $w }
+	toplevel $w
+	if {[is_Windows]} { set path [file nativename $path] }
+	wm title $w [mc "Worktrees for %s" $path]
+	wm geometry $w 960x360
+	wm minsize $w 640 240
+
+	ttk::frame $w.contents
+	text $w.contents.output \
+		-background white \
+		-foreground black \
+		-borderwidth 1 \
+		-relief sunken \
+		-width 110 -height 14 \
+		-wrap none \
+		-exportselection 0 \
+		-font font_diff \
+		-xscrollcommand [list $w.contents.sbx set] \
+		-yscrollcommand [list $w.contents.sby set]
+	ttk::scrollbar $w.contents.sbx -orient horizontal \
+		-command [list $w.contents.output xview]
+	ttk::scrollbar $w.contents.sby -orient vertical \
+		-command [list $w.contents.output yview]
+	pack $w.contents.sby -side right -fill y
+	pack $w.contents.sbx -side bottom -fill x
+	pack $w.contents.output -side left -fill both -expand 1
+	$w.contents.output insert 1.0 $output
+	$w.contents.output configure -state disabled
+	bind $w.contents.output <<Copy>> \
+		"[list repo_tab_copy_worktrees_selection $w.contents.output]\nbreak"
+
+	ttk::frame $w.buttons
+	ttk::button $w.buttons.open \
+		-text [mc "Open Worktree"] \
+		-state disabled \
+		-command [list repo_tab_open_worktree $w.contents.output $rows]
+	ttk::button $w.buttons.browse \
+		-text [mc "Open Repository..."] \
+		-command do_open_repo_tab
+	bind $w.contents.output <ButtonRelease-1> \
+		[list repo_tab_select_worktree %W %x %y $rows $w.buttons.open]
+	ttk::button $w.buttons.copy \
+		-text [mc "Copy Selection"] \
+		-command [list repo_tab_copy_worktrees_selection $w.contents.output]
+	ttk::button $w.buttons.close \
+		-text [mc "Close"] \
+		-command [list destroy $w]
+	pack $w.buttons.close -side right -padx 8 -pady 8
+	pack $w.buttons.copy -side right -padx 8 -pady 8
+	pack $w.buttons.open -side left -padx 8 -pady 8
+	pack $w.buttons.browse -side left -padx 8 -pady 8
+	pack $w.contents -side top -fill both -expand 1 -padx 8 -pady 8
+	pack $w.buttons -side bottom -fill x
+
+	wm protocol $w WM_DELETE_WINDOW [list destroy $w]
+	bind $w <Escape> [list destroy $w]
+	wm transient $w .
+	wm deiconify $w
+	raise $w
+	focus $w.contents.output
+}
+
+proc repo_tab_right_click {x y} {
+	repo_tab_hide_tooltip
+	if {[catch {.repotabs index @$x,$y} idx]} return
+	set tab [lindex [.repotabs tabs] $idx]
+	if {$tab eq {}} return
+	repo_tab_list_worktrees $tab
+}
+bind .repotabs <Button-3> [list repo_tab_right_click %x %y]
+if {[is_MacOSX]} {
+	bind .repotabs <Control-Button-1> [list repo_tab_right_click %x %y]
+}
+
+# Ctrl-Tab / Ctrl-Shift-Tab cycle through the repository tabs (built-in ttk).
+ttk::notebook::enableTraversal .repotabs
+
+# Reorder tabs by dragging within the tab strip: remember the tab the drag
+# started on, and as the pointer moves over a different tab position, move the
+# dragged tab there via the notebook's insert.
+set _repo_tab_drag {}
+proc repo_tab_drag_press {x y} {
+	global _repo_tab_drag
+	repo_tab_hide_tooltip
+	set _repo_tab_drag {}
+	if {[repo_tab_toggle_at $x $y]} { return -code break }
+	catch {set _repo_tab_drag [.repotabs index @$x,$y]}
+}
+proc repo_tab_drag_motion {x y} {
+	global _repo_tab_drag
+	if {$_repo_tab_drag eq {}} return
+	if {[catch {.repotabs index @$x,$y} idx]} return
+	if {$idx eq $_repo_tab_drag} return
+	catch {.repotabs insert $idx [lindex [.repotabs tabs] $_repo_tab_drag]}
+	set _repo_tab_drag $idx
+}
+proc repo_tab_drag_release {} {
+	global _repo_tab_drag
+	set _repo_tab_drag {}
+	repo_tab_refresh_groups
+	save_repo_tab_session
+}
+bind .repotabs <ButtonPress-1>   {repo_tab_drag_press %x %y}
+bind .repotabs <B1-Motion>       {repo_tab_drag_motion %x %y}
+bind .repotabs <ButtonRelease-1> {repo_tab_drag_release}
+
+# Record $wt as the most-recent repository without duplicating: drop any prior
+# entry for the same path, append it, then trim to gui.maxrecentrepo. Operates
+# directly on git config so it never disturbs the active repo context (unlike
+# the chooser's _append_recentrepos, which reloads config).
+proc _record_recent_repo {wt} {
+	set wt [file normalize $wt]
+	set re $wt
+	regsub -all -- {([()\[\]{}\.^$+*?\\])} $re {\\\1} re
+	catch {exec git config --global --unset-all gui.recentrepo "^$re\$"}
+	catch {exec git config --global --add gui.recentrepo $wt}
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
+		set maxrecent 10
+	}
+	if {![string is integer -strict $maxrecent] || $maxrecent <= 0} return
+	if {[catch {set recent [exec git config --global --get-all gui.recentrepo]}]} return
+	set recent [split $recent "\n"]
+	while {[llength $recent] > $maxrecent} {
+		set old [lindex $recent 0]
+		set ore $old
+		regsub -all -- {([()\[\]{}\.^$+*?\\])} $ore {\\\1} ore
+		catch {exec git config --global --unset-all gui.recentrepo "^$ore\$"}
+		set recent [lrange $recent 1 end]
+	}
+}
+
+proc save_repo_tab_session {} {
+	global global_config tab_path
+	if {![info exists global_config(gui.restoretabs)]} return
+	set enabled [string tolower $global_config(gui.restoretabs)]
+	set enabled [expr {$enabled eq {} || $enabled in {true 1 yes on}}]
+	if {!$enabled} {
+		catch {exec git config --global --unset-all gui.sessionrepo}
+		catch {exec git config --global --unset gui.sessionactive}
+		return
+	}
+
+	catch {exec git config --global --unset-all gui.sessionrepo}
+	foreach w [.repotabs tabs] {
+		if {![info exists tab_path($w)] || $tab_path($w) eq {}} continue
+		catch {exec git config --global --add gui.sessionrepo $tab_path($w)}
+	}
+	set selected [.repotabs select]
+	if {$selected ne {} && [info exists tab_path($selected)]} {
+		catch {exec git config --global gui.sessionactive $tab_path($selected)}
+	}
+}
+
+proc select_repo_tab_by_path {path} {
+	global tab_path
+	if {$path eq {}} return
+	foreach w [.repotabs tabs] {
+		if {[info exists tab_path($w)] && $tab_path($w) eq $path} {
+			.repotabs select $w
+			return
+		}
+	}
+}
+
+# Open another repository in a new tab: discover its git dirs, register a fresh
+# repoctx, build its UI under a new tab, load its config, and rescan.
+proc repo_tab_restore {path} {
+	global tab_path repo_tab_pending
+	set path [file normalize $path]
+	foreach tab [.repotabs tabs] {
+		if {[info exists tab_path($tab)] &&
+			([string equal $tab_path($tab) $path] ||
+			([is_Windows] && [string equal -nocase $tab_path($tab) $path]))} { return }
+	}
+	set gitdir [file join $path .git]
+	if {[file isfile $gitdir]} {
+		if {[catch {
+			set gitfile [open $gitdir r]
+			try {
+				set contents [string trim [read $gitfile 4096]]
+			} finally { close $gitfile }
+			if {![regexp {^gitdir: (.+)$} $contents -> target]} { error "Invalid gitdir file" }
+			set gitdir [file normalize [file join $path $target]]
+		}]} return
+	}
+	if {![file isdirectory $gitdir]} return
+	set tab .repotabs.repo[incr ::_repo_tab_seq]
+	ttk::frame $tab
+	set tab_path($tab) $path
+	set repo_tab_pending($tab) $path
+	repo_tab_add $tab $gitdir $path [file tail $path]
+}
+
+proc repo_tab_schedule_load {} {
+	global repo_tab_load_queue repo_tab_load_timer
+	if {$repo_tab_load_timer eq {} && [llength $repo_tab_load_queue] > 0} {
+		set repo_tab_load_timer [after 300 repo_tab_background_next]
+	}
+}
+
+proc repo_tab_queue_load {tab {priority 0}} {
+	global repo_tab_load_queue
+	set repo_tab_load_queue [lsearch -all -inline -not -exact $repo_tab_load_queue $tab]
+	if {$priority} {
+		set repo_tab_load_queue [linsert $repo_tab_load_queue 0 $tab]
+	} else {
+		lappend repo_tab_load_queue $tab
+	}
+	repo_tab_schedule_load
+}
+
+proc repo_tab_request_scan {tab} {
+	global repo_tab_load_queue rescan_active rescan_all_active index_lock_type
+	if {$rescan_active > 0 || $rescan_all_active || $index_lock_type ne "none"} {
+		repo_tab_queue_load $tab 1
+		return
+	}
+	set repo_tab_load_queue [lsearch -all -inline -not -exact $repo_tab_load_queue $tab]
+	do_rescan
+}
+
+proc repo_tab_background_next {} {
+	global repo_tab_load_queue repo_tab_load_timer repo_tab_pending tab_ctx
+	global rescan_active rescan_owner rescan_all_active index_lock_type
+	set repo_tab_load_timer {}
+	if {![winfo exists .repotabs]} { set repo_tab_load_queue {}; return }
+	if {$rescan_active > 0 && $rescan_owner ne {} &&
+		[lsearch -exact [repoctx::ids] $rescan_owner] < 0} {
+		set rescan_active 0
+		set rescan_owner {}
+		catch {unlock_index}
+	}
+	if {$rescan_active > 0 || $rescan_all_active || $index_lock_type ne "none"} {
+		repo_tab_schedule_load
+		return
+	}
+	set selected [.repotabs select]
+	if {[lsearch -exact $repo_tab_load_queue $selected] >= 0} {
+		set repo_tab_load_queue [linsert \
+			[lsearch -all -inline -not -exact $repo_tab_load_queue $selected] 0 $selected]
+	}
+	while {[llength $repo_tab_load_queue] > 0} {
+		set tab [lindex $repo_tab_load_queue 0]
+		set repo_tab_load_queue [lrange $repo_tab_load_queue 1 end]
+		if {![winfo exists $tab]} continue
+		set previous [repoctx::current]
+		set previous_dir [pwd]
+		try {
+			if {[info exists repo_tab_pending($tab)] && ![repo_tab_initialize $tab 0 1]} continue
+			if {![info exists tab_ctx($tab)]} continue
+			repoctx::use $tab_ctx($tab)
+			cd [repoctx::field worktree]
+			if {$tab eq [.repotabs select]} {
+				do_rescan
+			} else {
+				rescan {}
+			}
+		} on error {message options} {
+			if {$rescan_active == 0} { catch {unlock_index} }
+		} finally {
+			if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+				repoctx::use $previous
+			}
+			catch {cd $previous_dir}
+		}
+		break
+	}
+	repo_tab_schedule_load
+}
+
+proc repo_tab_initialize {tab {scan 1} {quiet 0}} {
+	global repo_tab_pending tab_ctx disable_on_lock
+	if {![info exists repo_tab_pending($tab)]} { return [info exists tab_ctx($tab)] }
+	set path $repo_tab_pending($tab)
+	set previous [repoctx::current]
+	set previous_ids [repoctx::ids]
+	set previous_dir [pwd]
+	unset repo_tab_pending($tab)
+	set initialized 0
+	set failed [catch {set initialized [open_repo_context $path $tab $scan]} message]
+	if {$failed || !$initialized} {
+		set failed_context [repoctx::current]
+		if {$previous ne {} && [lsearch -exact [repoctx::ids] $previous] >= 0} {
+			repoctx::reload $previous
+		}
+		if {$failed_context ne {} && [lsearch -exact $previous_ids $failed_context] < 0} {
+			repoctx::forget $failed_context
+		}
+		catch {cd $previous_dir}
+		foreach child [winfo children $tab] { destroy $child }
+		unset -nocomplain tab_ctx($tab)
+		set kept {}
+		foreach entry $disable_on_lock {
+			if {![string match $tab.* [lindex $entry 0]]} { lappend kept $entry }
+		}
+		set disable_on_lock $kept
+		set repo_tab_pending($tab) $path
+		if {!$failed} { set message [mc "Unable to open repository: %s" $path] }
+		if {!$quiet} { error_popup $message }
+		return 0
+	}
+	return 1
+}
+
+proc open_repo_context {path {w {}} {scan 1}} {
+	global tab_ctx tab_path env
+	set save [pwd]
+	# git-gui pins the active repo via GIT_DIR/GIT_WORK_TREE env vars, which
+	# override cwd. Clear them so discovery honors the chosen directory; the
+	# fresh context's _load will set them to the new repo.
+	set restore_env [dict create]
+	foreach variable {GIT_DIR GIT_WORK_TREE} {
+		if {[info exists env($variable)]} {
+			dict set restore_env $variable $env($variable)
+			unset env($variable)
+		}
+	}
+	try {
+		if {[catch {cd $path}]} { return 0 }
+		if {[catch {set gd [git rev-parse --git-dir]}]} { return 0 }
+		set gd [file normalize $gd]
+		set wt {}
+		catch {set wt [string trim [git rev-parse --show-toplevel]]}
+		if {$wt eq {}} { set wt [file normalize $path] }
+		set pfx {}
+		catch {set pfx [string trim [git rev-parse --show-prefix]]}
+	} finally {
+		cd $save
+		foreach variable {GIT_DIR GIT_WORK_TREE} { unset -nocomplain env($variable) }
+		dict for {variable value} $restore_env { set env($variable) $value }
+	}
+	set rn [file tail $wt]
+	_record_recent_repo $wt
+
+	if {$w eq {}} {
+		set w .repotabs.repo[incr ::_repo_tab_seq]
+		ttk::frame $w
+		repo_tab_add $w $gd $wt $rn
+	}
+
+	repoctx::open_context $gd $wt $rn $pfx
+	cd $wt
+	load_config 0
+	# Set the branch synchronously so this context saves the correct value when
+	# switched away from, before its async do_rescan below completes.
+	catch {load_current_branch}
+	# apply_config does one-time global theming (fonts/theme/pave_toplevel)
+	# already done at startup; for an extra repo we only need its comment char.
+	set ::comment_string [get_config core.commentstring]
+	if {$::comment_string eq {}} {
+		set ::comment_string [get_config core.commentchar]
+	}
+	build_repo_ui $w
+	set tab_ctx($w) [repoctx::current]
+	set tab_path($w) [file normalize $wt]
+
+	if {!$scan} { return 1 }
+	.repotabs select $w
+	# The tab-changed handler short-circuits when the new tab is already the
+	# active context, so populate this repo's Tools menu and title explicitly.
+	if {[info exists ::tools_menubar]} { tools_populate_all }
+	catch {set_repo_window_title}
+	repo_tab_request_scan $w
+	save_repo_tab_session
+	return 1
+}
+
+proc do_open_repo_tab {} {
+	set p [tk_chooseDirectory -title [mc "Open Repository In New Tab"] -mustexist 1]
+	if {$p ne {}} { open_repo_context $p }
+}
+
+# Existing repositories from the global recent list (deduped, still present),
+# newest first and capped at gui.maxrecentrepo (Edit > Options).
+proc recent_repo_paths {} {
+	set r {}
+	catch {set r [get_config gui.recentrepo]}
+	if {$r eq {}} {
+		catch {set r [split [string trim \
+			[exec git config --global --get-all gui.recentrepo]] "\n"]}
+	}
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
+		set maxrecent 10
+	}
+	set out {}
+	# git config lists oldest first; walk newest first and dedupe by first seen.
+	foreach p [lreverse $r] {
+		if {$p eq {} || [lsearch -exact $out $p] >= 0} continue
+		if {![file isdirectory $p]} continue
+		lappend out $p
+		if {$maxrecent > 0 && [llength $out] >= $maxrecent} break
+	}
+	return $out
+}
+
+proc populate_recent_tab_menu {} {
+	set m .mbar.repository.recent
+	$m delete 0 end
+	set recent [recent_repo_paths]
+	if {[llength $recent] == 0} {
+		$m add command -label [mc "(no recent repositories)"] -state disabled
+		return
+	}
+	foreach p $recent {
+		$m add command -label $p -command [list open_repo_context $p]
+	}
+}
+
+# Close the active repository tab (quit if it is the last one).
+proc close_repo_tab_widget {w} {
+	global tab_ctx repo_tab_family repo_tab_pending tab_path
+	repo_tab_hide_tooltip
+	if {$w eq {}} return
+	if {[llength [.repotabs tabs]] <= 1} { do_quit ; return }
+	set ctx {}
+	catch {set ctx $tab_ctx($w)}
+	set closing_active [expr {[.repotabs select] eq $w}]
+	set scan_survivor 0
+
+	if {$closing_active} {
+		# Pick the tab to activate after this closes (next one, else previous).
+		set tabs [.repotabs tabs]
+		set idx [lsearch -exact $tabs $w]
+		set rest [lreplace $tabs $idx $idx]
+		if {$idx < [llength $rest]} {
+			set stab [lindex $rest $idx]
+		} else {
+			set stab [lindex $rest end]
+		}
+		if {[info exists repo_tab_pending($stab)]} {
+			if {![repo_tab_initialize $stab 0]} return
+			set scan_survivor 1
+		}
+		.repotabs tab $stab -state normal
+		# Activate the survivor's context BEFORE destroying this tab. The
+		# closing repo's widgets are about to vanish, so load the survivor
+		# without saving the outgoing (now-invalid) globals back into any
+		# context.
+		if {$stab ne {} && [info exists tab_ctx($stab)]} {
+			repoctx::reload $tab_ctx($stab)
+			catch {cd [repoctx::field worktree]}
+		}
+	}
+
+	unset -nocomplain tab_ctx($w)
+	unset -nocomplain repo_tab_family($w)
+	unset -nocomplain repo_tab_pending($w) tab_path($w)
+	.repotabs forget $w
+	destroy $w
+	if {$ctx ne {}} { repoctx::forget $ctx }
+
+	# Drop this tab's widgets from the index-lock list so a later lock_index
+	# never touches the destroyed widgets.
+	global disable_on_lock
+	set kept {}
+	foreach e $disable_on_lock {
+		if {[string match $w.* [lindex $e 0]]} continue
+		lappend kept $e
+	}
+	set disable_on_lock $kept
+
+	if {$closing_active} {
+		catch {.repotabs select $stab}
+		catch {refresh_active_commit_state}
+		catch {set_repo_window_title}
+		if {[info exists ::tools_menubar]} { tools_populate_all }
+		if {$scan_survivor} { repo_tab_request_scan $stab }
+	}
+	repo_tab_refresh_groups
+	save_repo_tab_session
+}
+
+proc close_repo_tab {} { close_repo_tab_widget [.repotabs select] }
+
+proc close_repo_tab_at {x y} {
+	if {[catch {.repotabs index @$x,$y} idx]} return
+	close_repo_tab_widget [lindex [.repotabs tabs] $idx]
+}
 
 # -- Status Bar
 #
@@ -3708,9 +5514,9 @@ proc on_application_mapped {} {
 	global repo_config
 	bind . <Map> {}
 	set gm $repo_config(gui.geometry)
-	bind .vpane <Map> \
+	bind $::ui_vpane <Map> \
 		[list on_ttk_pane_mapped %W 0 [lindex $gm 1]]
-	bind .vpane.files <Map> \
+	bind $::ui_vpane_files <Map> \
 		[list on_ttk_pane_mapped %W 0 [lindex $gm 2]]
 	wm geometry . [lindex $gm 0]
 }
@@ -3771,7 +5577,6 @@ bind $ui_diff <Key-j>         {catch {%W yview scroll  1 units};break}
 bind $ui_diff <Key-h>         {catch {%W xview scroll -1 units};break}
 bind $ui_diff <Key-l>         {catch {%W xview scroll  1 units};break}
 bind $ui_diff <Control-Key-b> {catch {%W yview scroll -1 pages};break}
-bind $ui_diff <Control-Key-f> {catch {%W yview scroll  1 pages};break}
 bind $ui_diff <Button-1>   {focus %W}
 
 if {[is_enabled branch]} {
@@ -3788,6 +5593,7 @@ if {[is_enabled transport]} {
 }
 
 bind .   <Key-F5>     ui_do_rescan
+bind .   <Shift-Key-F5> do_rescan_all
 bind .   <$M1B-Key-r> ui_do_rescan
 bind .   <$M1B-Key-R> ui_do_rescan
 bind .   <$M1B-Key-s> do_signoff
@@ -3807,29 +5613,20 @@ bind .   <$M1B-Key-KP_Subtract> {show_less_context;break}
 bind .   <$M1B-Key-equal> {show_more_context;break}
 bind .   <$M1B-Key-plus> {show_more_context;break}
 bind .   <$M1B-Key-KP_Add> {show_more_context;break}
+bind .   <Key-F3>       {diff_goto_change 1}
+bind .   <Shift-Key-F3> {diff_goto_change -1}
+bind .   <Key-F7>       diff_show_finder
 bind .   <$M1B-Key-Return> do_commit
 bind .   <$M1B-Key-KP_Enter> do_commit
-foreach i [list $ui_index $ui_workdir] {
-	bind $i <Button-1>       { toggle_or_diff click %W %x %y; break }
-	bind $i <$M1B-Button-1>  { add_one_to_selection %W %x %y; break }
-	bind $i <Shift-Button-1> { add_range_to_selection %W %x %y; break }
-	bind $i <Key-Up>         { toggle_or_diff up %W; break }
-	bind $i <Key-Down>       { toggle_or_diff down %W; break }
-}
-unset i
 
 bind .   <Alt-Key-1> {focus_widget $::ui_workdir}
 bind .   <Alt-Key-2> {focus_widget $::ui_index}
 bind .   <Alt-Key-3> {focus $::ui_diff}
 bind .   <Alt-Key-4> {focus $::ui_comm}
 
-set file_lists_last_clicked($ui_index) {}
-set file_lists_last_clicked($ui_workdir) {}
+catch {diff_map_update}
 
-set file_lists($ui_index) [list]
-set file_lists($ui_workdir) [list]
-
-wm title . "[appname] ([reponame]) [file normalize $_gitworktree]"
+set_repo_window_title
 focus -force $ui_comm
 
 # -- Only initialize complex UI if we are going to stay running.
@@ -3872,6 +5669,7 @@ if {[winfo exists $ui_comm]} {
 	proc backup_commit_buffer {} {
 		global ui_comm GITGUI_BCK_exists
 
+		if {$ui_comm eq {} || ![winfo exists $ui_comm]} return
 		set m [$ui_comm edit modified]
 		if {$m || $GITGUI_BCK_exists} {
 			set msg [string trim [$ui_comm get 0.0 end]]
@@ -3970,6 +5768,50 @@ if {$picked && [is_config_true gui.autoexplore]} {
 
 # Clear "Initializing..." status
 after 500 {$main_status show ""}
+
+# Open any additional repositories passed on the command line as extra tabs, one
+# at a time: rescans are serialized, so opening them all at once would leave the
+# later repos un-scanned. Wait for the current rescan to finish before each open.
+proc open_repos_sequentially {paths {select_path {}}} {
+	global rescan_active
+	if {[llength $paths] == 0} {
+		select_repo_tab_by_path $select_path
+		save_repo_tab_session
+		return
+	}
+	if {$rescan_active > 0} {
+		after 100 [list open_repos_sequentially $paths $select_path]
+		return
+	}
+	open_repo_context [lindex $paths 0]
+	after 100 [list open_repos_sequentially \
+		[lrange $paths 1 end] $select_path]
+}
+proc restore_repo_tabs {paths select_path} {
+	global repo_tab_pending
+	foreach path $paths { repo_tab_restore $path }
+	select_repo_tab_by_path $select_path
+	foreach tab [.repotabs tabs] {
+		if {[info exists repo_tab_pending($tab)]} { repo_tab_queue_load $tab }
+	}
+	save_repo_tab_session
+}
+set _rest {}
+if {[info exists _multi_repo_paths]} {
+	set _rest [lrange $_multi_repo_paths 1 end]
+	set _restore_active_repo {}
+}
+set _startup_repo_path [file normalize $_gitworktree]
+set _session_rest {}
+foreach _session_path $_restore_repo_paths {
+	if {$_session_path eq $_startup_repo_path
+		|| [lsearch -exact $_rest $_session_path] >= 0} continue
+	lappend _session_rest $_session_path
+}
+after idle [list restore_repo_tabs $_session_rest $_restore_active_repo]
+if {[llength $_rest] > 0} {
+	after idle [list open_repos_sequentially $_rest $_restore_active_repo]
+}
 
 # Local variables:
 # mode: tcl

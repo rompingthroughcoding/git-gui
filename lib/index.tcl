@@ -737,6 +737,13 @@ proc do_revert_selection {} {
 proc do_select_commit_type {} {
 	global commit_type commit_type_is_amend
 
+	# Multi-repo: the active tab's HEAD/PARENT/commit_type may be a stale
+	# snapshot; refresh from git so amend sees this repo's real commit. Does not
+	# touch commit_type_is_amend, so the just-clicked amend intent is preserved.
+	if {[llength [info commands refresh_commit_state]]} {
+		refresh_commit_state
+	}
+
 	if {$commit_type_is_amend == 0
 		&& [string match amend* $commit_type]} {
 		create_new_commit

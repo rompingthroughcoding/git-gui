@@ -10,6 +10,47 @@ proc tools_list {} {
 	return [lsort $names]
 }
 
+# @BASE@ support: a guitool whose name or cmd contains @BASE@ is shown and run
+# against the repo's base branch -- the highest-priority LOCAL branch listed in
+# gui.basebranches (default "trunk production master main"). Cached per gitdir
+# and refreshed on rescan via tools_base_invalidate.
+proc tools_base_candidates {} {
+	set c [get_config gui.basebranches]
+	if {$c eq {}} { set c [list trunk production master main] }
+	return $c
+}
+
+proc tools_base_branch {} {
+	global tools_base_cache
+	set key [gitdir]
+	if {$key ne {} && [info exists tools_base_cache($key)]} {
+		return $tools_base_cache($key)
+	}
+	# Read local branch names directly (load_all_heads depends on remote state
+	# that isn't loaded yet when the Tools menu is first built at startup).
+	set heads {}
+	catch {
+		set fd [git_read [list for-each-ref --format=%(refname:strip=2) refs/heads]]
+		set heads [split [string trim [read $fd]] "\n"]
+		close $fd
+	}
+	set base {}
+	foreach b [tools_base_candidates] {
+		if {[lsearch -exact $heads $b] >= 0} { set base $b; break }
+	}
+	if {$key ne {}} { set tools_base_cache($key) $base }
+	return $base
+}
+
+proc tools_base_invalidate {} {
+	global tools_base_cache
+	catch {unset tools_base_cache([gitdir])}
+}
+
+proc tools_expand_base {s} {
+	return [string map [list @BASE@ [tools_base_branch]] $s]
+}
+
 proc tools_populate_all {} {
 	global tools_menubar tools_menutbl
 	global tools_tailcnt
@@ -22,7 +63,10 @@ proc tools_populate_all {} {
 
 	array unset tools_menutbl
 
+	set base [tools_base_branch]
 	foreach fullname [tools_list] {
+		# Hide @BASE@ tools in repos with no local base branch.
+		if {$base eq {} && [string match *@BASE@* $fullname]} continue
 		tools_populate_one $fullname
 	}
 }
@@ -45,6 +89,9 @@ proc tools_populate_one {fullname} {
 	}
 
 	set names [split $fullname '/']
+	# Menu labels show @BASE@ expanded to the base branch; the config key
+	# ($fullname) stays intact so tools_exec can find and expand the cmd.
+	set dispnames [split [tools_expand_base $fullname] '/']
 	set parent $tools_menubar
 	for {set i 0} {$i < [llength $names]-1} {incr i} {
 		set subname [join [lrange $names 0 $i] '/']
@@ -53,7 +100,7 @@ proc tools_populate_one {fullname} {
 		} else {
 			set subid $parent.t$tools_id
 			tools_create_item $parent cascade \
-					-label [lindex $names $i] -menu $subid
+					-label [lindex $dispnames $i] -menu $subid
 			menu $subid
 			set tools_menutbl($subname) $subid
 			set parent $subid
@@ -62,7 +109,7 @@ proc tools_populate_one {fullname} {
 	}
 
 	tools_create_item $parent command \
-		-label [lindex $names end] \
+		-label [lindex $dispnames end] \
 		-command [list tools_exec $fullname]
 }
 
@@ -108,12 +155,12 @@ proc tools_exec {fullname} {
 		set env(CUR_BRANCH) $current_branch
 	}
 
-	set cmdline $repo_config(guitool.$fullname.cmd)
+	set cmdline [tools_expand_base $repo_config(guitool.$fullname.cmd)]
 	if {[is_config_true "guitool.$fullname.noconsole"]} {
 		tools_run_silent [list [shellpath] -c $cmdline] \
 				 [list tools_complete $fullname {}]
 	} else {
-		regsub {/} $fullname { / } title
+		regsub {/} [tools_expand_base $fullname] { / } title
 		set w [console::new \
 			[mc "Tool: %s" $title] \
 			[mc "Running: %s" $cmdline]]

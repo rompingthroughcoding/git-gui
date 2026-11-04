@@ -13,18 +13,158 @@ proc apply_tab_size {{firsttab {}}} {
 }
 
 proc clear_diff {} {
-	global ui_diff current_diff_path current_diff_header
+	global ui_diff ui_diff_ln current_diff_path current_diff_header
 	global ui_index ui_workdir
 
 	$ui_diff conf -state normal
 	$ui_diff delete 0.0 end
 	$ui_diff conf -state disabled
 
+	$ui_diff_ln conf -state normal
+	$ui_diff_ln delete 0.0 end
+	$ui_diff_ln conf -state disabled
+
 	set current_diff_path {}
 	set current_diff_header {}
 
 	$ui_index tag remove in_diff 0.0 end
 	$ui_workdir tag remove in_diff 0.0 end
+
+	unset -nocomplain ::diff_change_state($ui_diff)
+	diff_map_update
+}
+
+# Text tags that mark changed lines, with the colour used in the overview map.
+proc diff_change_colors {} {
+	return {
+		d_+ #00a000 d_++ #00a000 d_+s #00a000 d_s+ #00a000
+		d_- #e00000 d_-- #e00000 d_-s #e00000 d_s- #e00000
+		d< orange d| orange d= orange d> orange
+	}
+}
+
+# Contiguous runs of changed lines in text widget $t as {first last+1} pairs.
+proc diff_change_blocks {t} {
+	set iv {}
+	foreach {tag _c} [diff_change_colors] {
+		foreach {a b} [$t tag ranges $tag] {
+			lappend iv [list [lindex [split $a .] 0] [lindex [split $b .] 0]]
+		}
+	}
+	set blocks {}
+	foreach i [lsort -integer -index 0 $iv] {
+		lassign $i s e
+		if {$blocks ne {} && $s <= [lindex $blocks end 1]} {
+			if {$e > [lindex $blocks end 1]} {
+				lset blocks end 1 $e
+			}
+		} else {
+			lappend blocks [list $s $e]
+		}
+	}
+	return $blocks
+}
+
+# Scroll the diff to the next ($dir > 0) or previous change block.
+proc diff_goto_change {dir {quiet 0}} {
+	global ui_diff diff_change_state
+	set margin 3
+
+	set blocks [diff_change_blocks $ui_diff]
+	if {$blocks eq {}} {
+		if {!$quiet} bell
+		return
+	}
+
+	set top [lindex [split [$ui_diff index @0,0] .] 0]
+	# Right after a jump, navigate relative to the block jumped to: yview
+	# clamps at the file ends so the top line alone can't identify it.
+	if {[info exists diff_change_state($ui_diff)]
+	 && [lindex $diff_change_state($ui_diff) 1] == $top} {
+		set ref [lindex $diff_change_state($ui_diff) 0]
+	} elseif {$top <= 1} {
+		set ref [expr {$dir > 0 ? 0 : 2}]
+	} else {
+		set ref [expr {$top + $margin}]
+	}
+
+	set target {}
+	if {$dir > 0} {
+		foreach b $blocks {
+			if {[lindex $b 0] > $ref} {
+				set target [lindex $b 0]
+				break
+			}
+		}
+	} else {
+		foreach b [lreverse $blocks] {
+			if {[lindex $b 0] < $ref} {
+				set target [lindex $b 0]
+				break
+			}
+		}
+	}
+	if {$target eq {}} {
+		bell
+		return
+	}
+
+	$ui_diff yview [expr {max($target - $margin, 1)}].0
+	update idletasks
+	set diff_change_state($ui_diff) \
+		[list $target [lindex [split [$ui_diff index @0,0] .] 0]]
+}
+
+proc diff_whole_file_changed {} {
+	global repo_config diff_whole_file_ui
+	set repo_config(gui.diffwholefile) \
+		[expr {$diff_whole_file_ui ? {true} : {false}}]
+	diff_map_update
+	reshow_diff
+}
+
+# Sync the whole-file menu state and show/hide the change map beside the
+# scrollbar of the active diff (shown only in whole-file mode).
+proc diff_map_update {} {
+	global ui_diff diff_whole_file_ui
+	set diff_whole_file_ui [is_config_true gui.diffwholefile]
+	if {![info exists ui_diff] || ![winfo exists $ui_diff]} return
+	set body [winfo parent $ui_diff]
+	set map $body.map
+	if {![winfo exists $map]} return
+	if {$diff_whole_file_ui} {
+		pack $map -side right -fill y -after $body.sby
+		diff_map_draw $map
+	} else {
+		pack forget $map
+		$map delete all
+	}
+}
+
+proc diff_map_draw {map} {
+	set t [winfo parent $map].t
+	$map delete all
+	set h [winfo height $map]
+	set w [winfo width $map]
+	set total [expr {[lindex [split [$t index end] .] 0] - 1}]
+	if {$h <= 1 || $total < 1} return
+	set scale [expr {double($h) / $total}]
+	foreach {tag color} [diff_change_colors] {
+		foreach {a b} [$t tag ranges $tag] {
+			set y1 [expr {([lindex [split $a .] 0] - 1) * $scale}]
+			set y2 [expr {([lindex [split $b .] 0] - 1) * $scale}]
+			if {$y2 - $y1 < 2} {set y2 [expr {$y1 + 2}]}
+			$map create rectangle 0 $y1 $w $y2 -fill $color -outline {}
+		}
+	}
+}
+
+proc diff_map_click {map y} {
+	set t [winfo parent $map].t
+	set h [winfo height $map]
+	if {$h <= 1} return
+	lassign [$t yview] first last
+	$t yview moveto [expr {double($y) / $h - ($last - $first) / 2.0}]
 }
 
 proc reshow_diff {{after {}}} {
@@ -65,6 +205,7 @@ proc handle_empty_diff {} {
 	global ui_diff
 
 	set path $current_diff_path
+	if {![info exists file_states($path)]} return
 	set s $file_states($path)
 	if {[lindex $s 0] ne {_M} || [has_textconv $path]} return
 
@@ -153,7 +294,7 @@ proc show_unmerged_diff {cont_info} {
 }
 
 proc advance_diff_queue {cont_info} {
-	global current_diff_queue ui_diff
+	global current_diff_queue ui_diff ui_diff_ln
 
 	set item [lindex $current_diff_queue 0]
 	set current_diff_queue [lrange $current_diff_queue 1 end]
@@ -162,13 +303,20 @@ proc advance_diff_queue {cont_info} {
 	$ui_diff insert end [lindex $item 0] [lindex $item 1]
 	$ui_diff conf -state disabled
 
+	$ui_diff_ln conf -state normal
+	set _nlines [regexp -all {\n} [lindex $item 0]]
+	for {set _i 0} {$_i < $_nlines} {incr _i} {
+		$ui_diff_ln insert end "\n"
+	}
+	$ui_diff_ln conf -state disabled
+
 	start_show_diff $cont_info [lindex $item 2]
 }
 
 proc show_other_diff {path w m cont_info} {
 	global file_states file_lists
 	global is_3way_diff diff_active repo_config
-	global ui_diff ui_index ui_workdir
+	global ui_diff ui_diff_ln ui_index ui_workdir
 	global current_diff_path current_diff_side current_diff_header
 
 	# - Git won't give us the diff, there's nothing to compare to!
@@ -240,6 +388,12 @@ proc show_other_diff {path w m cont_info} {
 			}
 		}
 		$ui_diff conf -state disabled
+		$ui_diff_ln conf -state normal
+		set _nln [expr {[lindex [split [$ui_diff index end] .] 0] - 1}]
+		for {set _i 0} {$_i < $_nln} {incr _i} {
+			$ui_diff_ln insert end "\n"
+		}
+		$ui_diff_ln conf -state disabled
 		set diff_active 0
 		unlock_index
 		set scroll_pos [lindex $cont_info 0]
@@ -271,6 +425,8 @@ proc start_show_diff {cont_info {add_opts {}}} {
 	set is_submodule_diff 0
 	set diff_active 1
 	set current_diff_header {}
+	set ::diff_old_lno 0
+	set ::diff_new_lno 0
 	set conflict_size [gitattr $path conflict-marker-size 7]
 
 	set cmd [list]
@@ -298,7 +454,10 @@ proc start_show_diff {cont_info {add_opts {}}} {
 	lappend cmd -p
 	lappend cmd --color
 	set cmd [concat $cmd $repo_config(gui.diffopts)]
-	if {$repo_config(gui.diffcontext) >= 1} {
+	if {[is_config_true gui.diffwholefile]} {
+		# Large but overflow-safe in xdiff's 32-bit arithmetic.
+		lappend cmd -U999999999
+	} elseif {$repo_config(gui.diffcontext) >= 1} {
 		lappend cmd "-U$repo_config(gui.diffcontext)"
 	}
 	if {$w eq $ui_index} {
@@ -330,7 +489,9 @@ proc start_show_diff {cont_info {add_opts {}}} {
 		-blocking 0 \
 		-encoding [get_path_encoding $path] \
 		-translation lf
-	fileevent $fd readable [list read_diff $fd $conflict_size $cont_info]
+	fileevent $fd readable [list repoctx_dispatch [repoctx::current] \
+		[list read_diff $fd $conflict_size $cont_info] \
+		{set ::diff_active 0; unlock_index}]
 }
 
 proc parse_color_line {line} {
@@ -359,11 +520,12 @@ proc parse_color_line {line} {
 }
 
 proc read_diff {fd conflict_size cont_info} {
-	global ui_diff diff_active is_submodule_diff
+	global ui_diff ui_diff_ln diff_active is_submodule_diff
 	global is_3way_diff is_conflict_diff current_diff_header
 	global current_diff_queue
 
 	$ui_diff conf -state normal
+	$ui_diff_ln conf -state normal
 	while {[gets $fd line] >= 0} {
 		foreach {line markup} [parse_color_line $line] break
 		set line [string map {\033 ^} $line]
@@ -496,12 +658,44 @@ proc read_diff {fd conflict_size cont_info} {
 			}
 			}
 		}
+		# -- Compute line number gutter text for 2-way diffs
+		set _ln_text {}
+		if {!$::current_diff_inheader \
+				&& $line ne {\ No newline at end of file} \
+				&& !$is_3way_diff && !$is_submodule_diff} {
+			switch -- [string index $line 0] {
+			{ } {
+				incr ::diff_old_lno
+				incr ::diff_new_lno
+				set _ln_text [format "%5d %5d" \
+					$::diff_old_lno $::diff_new_lno]
+			}
+			{@} {
+				if {[regexp \
+						{@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@} \
+						$line -> _o _n]} {
+					set ::diff_old_lno [expr {$_o - 1}]
+					set ::diff_new_lno [expr {$_n - 1}]
+				}
+			}
+			{-} {
+				incr ::diff_old_lno
+				set _ln_text [format "%5d      " $::diff_old_lno]
+			}
+			{+} {
+				incr ::diff_new_lno
+				set _ln_text [format "      %5d" $::diff_new_lno]
+			}
+			}
+		}
+
 		set mark [$ui_diff index "end - 1 line linestart"]
 		$ui_diff insert end $line $tags
 		if {[string index $line end] eq "\r"} {
 			$ui_diff tag add d_cr {end - 2c}
 		}
 		$ui_diff insert end "\n" $tags
+		$ui_diff_ln insert end "$_ln_text\n"
 
 		foreach {posbegin colbegin posend colend} $markup {
 			set prefix clr
@@ -515,6 +709,7 @@ proc read_diff {fd conflict_size cont_info} {
 		}
 	}
 	$ui_diff conf -state disabled
+	$ui_diff_ln conf -state disabled
 
 	if {[eof $fd]} {
 		close $fd
@@ -533,6 +728,11 @@ proc read_diff {fd conflict_size cont_info} {
 		}
 		ui_ready
 
+		diff_map_update
+		if {$scroll_pos eq {} && [is_config_true gui.diffwholefile]} {
+			diff_goto_change 1 1
+		}
+
 		if {[$ui_diff index end] eq {2.0}} {
 			handle_empty_diff
 		}
@@ -546,7 +746,7 @@ proc read_diff {fd conflict_size cont_info} {
 
 proc apply_or_revert_hunk {x y revert} {
 	global current_diff_path current_diff_header current_diff_side
-	global ui_diff ui_index file_states last_revert last_revert_enc
+	global ui_diff ui_diff_ln ui_index file_states last_revert last_revert_enc
 
 	if {$current_diff_path eq {} || $current_diff_header eq {}} return
 	if {![lock_index apply_hunk]} return
@@ -609,6 +809,10 @@ proc apply_or_revert_hunk {x y revert} {
 	$ui_diff conf -state normal
 	$ui_diff delete $s_lno $e_lno
 	$ui_diff conf -state disabled
+
+	$ui_diff_ln conf -state normal
+	$ui_diff_ln delete $s_lno $e_lno
+	$ui_diff_ln conf -state disabled
 
 	# Check if the hunk was the last one in the file.
 	if {[$ui_diff get 1.0 end] eq "\n"} {

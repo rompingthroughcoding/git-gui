@@ -27,7 +27,7 @@ field sorted_recent       ; # recent repositories (sorted)
 constructor pick {} {
 	global M1T M1B
 
-	if {[set maxrecent [get_config gui.maxrecentrepo]] eq {}} {
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
 		set maxrecent 10
 	}
 
@@ -152,17 +152,21 @@ constructor pick {} {
 		ttk::label $w_body.recentlabel \
 			-anchor w \
 			-text [mc "Open Recent Repository:"]
-		set w_recentlist $w_body.recentlist
-		text $w_recentlist \
+		# Cap the visible height so the window (and the Open Selected button)
+		# stays on screen; scroll for any overflow.
+		set nrecent [llength $sorted_recent]
+		set lbheight [expr {$nrecent < 12 ? $nrecent : 12}]
+		if {$lbheight < 1} { set lbheight 1 }
+		ttk::frame $w_body.recentf
+		set w_recentlist $w_body.recentf.list
+		listbox $w_recentlist \
 			-cursor $::cursor_ptr \
 			-relief flat \
 			-background [get_bg_color $w_body.recentlabel] \
-			-wrap none \
+			-selectmode multiple \
+			-takefocus 1 \
 			-width 50 \
-			-height $lenrecent
-		$w_recentlist tag conf link \
-			-foreground blue \
-			-underline 1
+			-height $lbheight
 		set home $::env(HOME)
 		set home "[file normalize $home]/"
 		set hlen [string length $home]
@@ -172,8 +176,7 @@ constructor pick {} {
 				set p "~/[string range $p $hlen end]"
 			}
 			regsub -all "\n" $p "\\n" p
-			$w_recentlist insert end $p link
-			$w_recentlist insert end "\n"
+			$w_recentlist insert end $p
 
 			if {$m_repo ne {}} {
 				$m_repo add command \
@@ -181,11 +184,28 @@ constructor pick {} {
 					-label "    $p"
 			}
 		}
-		$w_recentlist conf -state disabled
-		$w_recentlist tag bind link <1> [cb _open_recent %x,%y]
+		# Click a row to toggle it (no modifier needed), or arrow + Space by
+		# keyboard; "Open Selected"/Enter opens everything checked (first =
+		# primary), and double-click opens just that repo.
+		bind $w_recentlist <Double-Button-1> "[cb _open_recent_click %y] ; break"
+		bind $w_recentlist <Return> "[cb _open_recent_selection] ; break"
+		bind $w_recentlist <KP_Enter> "[cb _open_recent_selection] ; break"
+		ttk::button $w_body.openrecent \
+			-text [mc "Open Selected"] \
+			-command [cb _open_recent_selection]
 		pack $w_body.space -anchor w -fill x
 		pack $w_body.recentlabel -anchor w -fill x
-		pack $w_recentlist -anchor w -fill x
+		if {$nrecent > $lbheight} {
+			ttk::scrollbar $w_body.recentf.sb \
+				-orient vertical \
+				-command [list $w_recentlist yview]
+			$w_recentlist configure \
+				-yscrollcommand [list $w_body.recentf.sb set]
+			pack $w_body.recentf.sb -side right -fill y
+		}
+		pack $w_recentlist -side left -fill x -expand 1
+		pack $w_body.recentf -anchor w -fill x
+		pack $w_body.openrecent -anchor w -pady {4 0}
 	}
 	pack $w_body -fill x -padx 10 -pady 10
 
@@ -210,7 +230,7 @@ constructor pick {} {
 	bind $top <Visibility> "
 		[cb _center]
 		grab $top
-		focus $top
+		[cb _focus_start]
 		bind $top <Visibility> {}
 	"
 	wm deiconify $top
@@ -233,6 +253,19 @@ method _center {} {
 method _invoke_next {} {
 	if {[winfo exists $w_next]} {
 		uplevel #0 [$w_next cget -command]
+	}
+}
+
+method _focus_start {} {
+	# Put keyboard focus on the recent list with the first row active so it can
+	# be navigated (arrows) and toggled (space) without touching the mouse.
+	if {[info exists w_recentlist] && $w_recentlist ne {}
+	 && [winfo exists $w_recentlist]} {
+		$w_recentlist selection clear 0 end
+		$w_recentlist activate 0
+		focus $w_recentlist
+	} else {
+		focus $top
 	}
 }
 
@@ -271,7 +304,7 @@ proc _append_recentrepos {path} {
 	load_config 1
 	set recent [get_config gui.recentrepo]
 
-	if {[set maxrecent [get_config gui.maxrecentrepo]] eq {}} {
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
 		set maxrecent 10
 	}
 
@@ -281,9 +314,28 @@ proc _append_recentrepos {path} {
 	}
 }
 
-method _open_recent {xy} {
-	set id [lindex [split [$w_recentlist index @$xy] .] 0]
-	set local_path [lindex $sorted_recent [expr {$id - 1}]]
+method _open_recent_selection {} {
+	set sel [$w_recentlist curselection]
+	if {[llength $sel] == 0} {
+		# Nothing checked: fall back to the active (highlighted) row so a keyboard
+		# user can just arrow to a repo and press Enter.
+		set a [$w_recentlist index active]
+		if {$a ne {} && $a >= 0} { set sel [list $a] }
+	}
+	if {[llength $sel] == 0} return
+	set paths {}
+	foreach i $sel { lappend paths [lindex $sorted_recent $i] }
+	# Open the first as the primary repo; any others open as extra tabs.
+	if {[llength $paths] > 1} { set ::_multi_repo_paths $paths }
+	set local_path [lindex $paths 0]
+	_do_open2 $this
+}
+
+method _open_recent_click {y} {
+	# Double-click opens just the clicked repo, regardless of what is checked.
+	set idx [$w_recentlist nearest $y]
+	if {$idx < 0} return
+	set local_path [lindex $sorted_recent $idx]
 	_do_open2 $this
 }
 
