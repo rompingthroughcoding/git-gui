@@ -2574,10 +2574,9 @@ proc ado_repo_web_url {remote_url} {
 	return {}
 }
 
-# Build the Azure DevOps web URL showing $path at the checked out revision.
-proc ado_file_url {path} {
-	global repo_config current_branch is_detached
-
+# Return the selected repository's Azure DevOps web URL, or {} if unavailable.
+proc ado_repository_web_url {} {
+	global repo_config
 	set remote {}
 	if {[info exists repo_config(remote.origin.url)]} {
 		set remote $repo_config(remote.origin.url)
@@ -2591,7 +2590,14 @@ proc ado_file_url {path} {
 		return {}
 	}
 
-	set base [ado_repo_web_url $remote]
+	return [ado_repo_web_url $remote]
+}
+
+# Build the Azure DevOps web URL showing $path at the checked out revision.
+proc ado_file_url {path} {
+	global current_branch is_detached
+
+	set base [ado_repository_web_url]
 	if {$base eq {}} {
 		return {}
 	}
@@ -4441,14 +4447,16 @@ proc build_diff_header {w} {
 		-command {do_file_open $current_diff_path}
 	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
 	$ctxm add separator
-	$ctxm add command \
-		-label [mc "Open in Azure DevOps"] \
-		-command {do_ado_open $current_diff_path}
-	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
-	$ctxm add command \
-		-label [mc "Copy Azure DevOps Link"] \
-		-command {do_ado_copy $current_diff_path}
-	lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	if {[ado_repository_web_url] ne {}} {
+		$ctxm add command \
+			-label [mc "Open in Azure DevOps"] \
+			-command {do_ado_open $current_diff_path}
+		lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+		$ctxm add command \
+			-label [mc "Copy Azure DevOps Link"] \
+			-command {do_ado_copy $current_diff_path}
+		lappend diff_actions [list $ctxm entryconf [$ctxm index last] -state]
+	}
 	bind_button3 $w.header.path "tk_popup $ctxm %X %Y"
 	bind $w.header.path <Button-1> {do_file_open $current_diff_path}
 	bind $w.header.path <Button-2> {
