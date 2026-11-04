@@ -150,7 +150,6 @@ proc do_options {} {
 		{b gui.matchtrackingbranch {mc "Match Tracking Branches"}}
 		{b gui.textconv {mc "Use Textconv For Diffs and Blames"}}
 		{b gui.fastcopyblame {mc "Blame Copy Only On Changed Files"}}
-		{i-0..100 gui.maxrecentrepo {mc "Maximum Length of Recent Repositories List"} {} global}
 		{i-20..200 gui.copyblamethreshold {mc "Minimum Letters To Blame Copy On"}}
 		{i-0..300 gui.blamehistoryctx {mc "Blame History Context Radius (days)"}}
 		{i-1..99 gui.diffcontext {mc "Number of Diff Context Lines"}}
@@ -169,10 +168,8 @@ proc do_options {} {
 		set type [lindex $option 0]
 		set name [lindex $option 1]
 		set text [eval [lindex $option 2]]
-		set scopes [lindex $option 4]
-		if {$scopes eq {}} {set scopes {repo global}}
 		incr optid
-		foreach f $scopes {
+		foreach f {repo global} {
 			switch -glob -- $type {
 			b {
 				ttk::checkbutton $w.$f.$optid -text $text \
@@ -234,14 +231,6 @@ proc do_options {} {
 		}
 	}
 
-	incr optid
-	ttk::checkbutton $w.global.$optid \
-		-text [mc "Reopen Tabs From Last Session"] \
-		-variable global_config_new(gui.restoretabs) \
-		-onvalue true \
-		-offvalue false
-	pack $w.global.$optid -side top -anchor w
-
 	set all_dicts [linsert \
 		[spellcheck::available_langs] \
 		0 \
@@ -267,6 +256,29 @@ proc do_options {} {
 		pack $w.$f.$optid -side top -anchor w -fill x
 	}
 	unset all_dicts
+
+	incr optid
+	ttk::checkbutton $w.global.$optid \
+		-text [mc "Reopen Tabs From Last Session"] \
+		-variable global_config_new(gui.restoretabs) \
+		-onvalue true \
+		-offvalue false
+	pack $w.global.$optid -side top -anchor w
+
+	incr optid
+	set text [mc "Maximum Length of Recent Repositories List"]
+	ttk::frame $w.global.$optid
+	ttk::label $w.global.$optid.l -text [mc "%s:" $text]
+	tspinbox $w.global.$optid.v \
+		-textvariable global_config_new(gui.maxrecentrepo) \
+		-from 0 \
+		-to 100 \
+		-increment 1 \
+		-width 4
+	bind $w.global.$optid.v <FocusIn> {%W selection range 0 end}
+	pack $w.global.$optid.l -side left -anchor w -fill x
+	pack $w.global.$optid.v -side right -anchor e -padx 5
+	pack $w.global.$optid -side top -anchor w -fill x
 
 	set all_fonts [lsort [font families]]
 	foreach option $font_descs {
