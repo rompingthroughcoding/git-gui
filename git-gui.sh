@@ -523,6 +523,15 @@ proc get_config {name} {
 	}
 }
 
+proc get_global_config {name} {
+	global global_config
+	if {[catch {set v $global_config($name)}]} {
+		return {}
+	} else {
+		return $v
+	}
+}
+
 proc is_bare {} {
 	global _isbare
 	global _gitdir
@@ -5126,7 +5135,7 @@ proc _record_recent_repo {wt} {
 	regsub -all -- {([()\[\]{}\.^$+*?\\])} $re {\\\1} re
 	catch {exec git config --global --unset-all gui.recentrepo "^$re\$"}
 	catch {exec git config --global --add gui.recentrepo $wt}
-	if {[catch {set maxrecent [exec git config --get gui.maxrecentrepo]}]} {
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
 		set maxrecent 10
 	}
 	if {![string is integer -strict $maxrecent] || $maxrecent <= 0} return
@@ -5391,7 +5400,7 @@ proc recent_repo_paths {} {
 		catch {set r [split [string trim \
 			[exec git config --global --get-all gui.recentrepo]] "\n"]}
 	}
-	if {[set maxrecent [get_config gui.maxrecentrepo]] eq {}} {
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
 		set maxrecent 10
 	}
 	set out {}

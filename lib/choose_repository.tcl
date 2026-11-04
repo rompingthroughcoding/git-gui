@@ -27,7 +27,7 @@ field sorted_recent       ; # recent repositories (sorted)
 constructor pick {} {
 	global M1T M1B
 
-	if {[set maxrecent [get_config gui.maxrecentrepo]] eq {}} {
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
 		set maxrecent 10
 	}
 
@@ -304,7 +304,7 @@ proc _append_recentrepos {path} {
 	load_config 1
 	set recent [get_config gui.recentrepo]
 
-	if {[set maxrecent [get_config gui.maxrecentrepo]] eq {}} {
+	if {[set maxrecent [get_global_config gui.maxrecentrepo]] eq {}} {
 		set maxrecent 10
 	}
 
